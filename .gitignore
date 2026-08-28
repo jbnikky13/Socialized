@@ -1,0 +1,10 @@
+.env
+.streamlit/secrets.toml
+client_secret.json
+token.json
+.client_secret_runtime.json
+content_bot.db
+media/
+__pycache__/
+*.pyc
+.DS_Store
