@@ -12,12 +12,39 @@ def _gemini(prompt: str) -> dict:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {"system_instruction": {"parts": [{"text": SYSTEM}]}, "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7}}
-    r = requests.post(url, params={"key": key}, json=payload, timeout=90)
-    r.raise_for_status()
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.7,
+        },
+    }
+    # Google documents x-goog-api-key as the supported API-key header.
+    r = requests.post(
+        url,
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+        json=payload,
+        timeout=90,
+    )
+    if not r.ok:
+        try:
+            detail = r.json().get("error", {}).get("message", r.text)
+        except Exception:
+            detail = r.text
+        raise RuntimeError(f"Gemini API error ({r.status_code}): {detail}")
     data = r.json()
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text)
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates. Check the model, API key, and safety response.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini returned non-JSON output: {text[:500]}") from exc
 
 
 def generate_package(topic: str, niche: str, format_name: str = "long-form", source_context: str = ""):
