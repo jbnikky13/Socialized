@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, tempfile
+import os, shutil, subprocess, tempfile
 from pathlib import Path
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
@@ -24,8 +24,19 @@ def make_thumbnail(title: str, out_path: str) -> str:
     return out_path
 
 
+def _ffmpeg_binary() -> str | None:
+    """Return an available ffmpeg executable, if the deployment image provides one."""
+    return shutil.which("ffmpeg") or shutil.which("avconv")
+
+
 def make_video(voice_path: str, out_path: str, thumbnail_path: str) -> str:
-    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", thumbnail_path, "-i", voice_path, "-c:v", "libx264", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart", out_path]
+    ffmpeg = _ffmpeg_binary()
+    if not ffmpeg:
+        raise RuntimeError(
+            "FFmpeg is not installed in the Streamlit deployment. "
+            "Add the system package ffmpeg to the deployment (packages.txt on Streamlit Cloud), then reboot the app."
+        )
+    cmd = [ffmpeg, "-y", "-loop", "1", "-i", thumbnail_path, "-i", voice_path, "-c:v", "libx264", "-tune", "stillimage", "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p", "-shortest", "-movflags", "+faststart", out_path]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     return out_path
 
