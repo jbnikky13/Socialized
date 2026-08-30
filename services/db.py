@@ -7,9 +7,16 @@ from supabase import create_client
 
 def client():
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    # Streamlit server-side apps should use the service-role key for backend
+    # persistence when no Supabase Auth session is present. Never expose this
+    # key to the browser or commit it to GitHub.
+    key = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_KEY")
+        or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    )
     if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required")
+        raise RuntimeError("SUPABASE_URL and a Supabase server key are required")
     return create_client(url, key)
 
 
