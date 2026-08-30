@@ -4,7 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from services.research import research_topics
 from services.ai import generate_package
-from services.youtube import get_service, channel_info, upload_video
+from services.youtube import get_service, channel_info, upload_video, begin_oauth, finish_oauth
 from services.x import XService
 from services.campaigns import save_campaign, recent_campaigns, reuse_campaign
 from services import media
@@ -22,6 +22,16 @@ def content_value(platform, content_type=None, fallback=""):
         if item.get("platform") == platform and (content_type is None or item.get("content_type") == content_type) and (item.get("body") or "").strip(): return item["body"]
     return fallback
 
+# Complete OAuth callback before rendering publisher controls.
+params = st.query_params
+if params.get("code") and st.session_state.get("youtube_oauth_state"):
+    try:
+        finish_oauth(params["code"], st.session_state.pop("youtube_oauth_state"))
+        st.query_params.clear()
+        st.success("YouTube connected successfully. You can now publish videos.")
+    except Exception as ex:
+        st.error(f"YouTube authorization failed: {ex}")
+
 with st.sidebar:
     st.header("Creator setup")
     channel_name = st.text_input("YouTube channel", os.getenv("CHANNEL_NAME", "My YouTube Channel"))
@@ -29,7 +39,14 @@ with st.sidebar:
     format_name = st.selectbox("YouTube format", ["long-form", "Short", "news", "explainer", "story"])
     approval_required = st.toggle("Require approval before publishing", True)
     st.divider(); st.subheader("Connections")
-    if st.button("🔗 Connect / Check YouTube", use_container_width=True):
+    if st.button("🔗 Connect YouTube", use_container_width=True):
+        try:
+            url, state = begin_oauth()
+            st.session_state["youtube_oauth_state"] = state
+            st.link_button("Continue with Google →", url, use_container_width=True)
+            st.info("If Google rejects the redirect URI, add this exact deployed app URL to Google Cloud Console → Credentials → your OAuth client → Authorized redirect URIs.")
+        except Exception as e: st.error(str(e))
+    if st.button("Check YouTube connection", use_container_width=True):
         try:
             info = channel_info(get_service())
             if info: st.success(f"Connected: {info['snippet']['title']}")
@@ -68,7 +85,7 @@ with create_tab:
                 pack = dict(package); pack.update({"title": title, "script": script.strip() or hook.strip(), "description": description.strip(), "tags": [x.strip() for x in tags.split(",") if x.strip()], "thumbnail_text": thumbnail, "x_posts": x_posts})
                 if not pack["script"].strip(): raise ValueError("The generated YouTube script is empty. Generate the campaign again before saving.")
                 if not pack["description"].strip(): raise ValueError("The generated YouTube description is empty. Generate the campaign again before saving.")
-                campaign = save_campaign(title, niche, pack); campaign["script"] = pack["script"]; campaign["title"] = title; campaign["description"] = pack["description"]
+                campaign = save_campaign(title, niche, pack); campaign["script"] = pack["script"]; campaign["description"] = pack["description"]; campaign["title"] = title
                 st.session_state["last_campaign"] = campaign
                 st.session_state["reused_content"] = [{"platform":"youtube","content_type":"video","title":title,"body":pack["script"]},{"platform":"youtube","content_type":"description","title":title,"body":pack["description"]}] + [{"platform":"x","content_type":"post","title":title,"body":p} for p in x_posts]
                 st.success(f"Campaign saved: {campaign['id']}"); st.session_state.pop("package", None)
@@ -81,7 +98,8 @@ with queue_tab:
         if not campaigns: st.info("No campaigns saved yet.")
         for campaign in campaigns:
             with st.expander(f"{campaign['name']} · {campaign['status']}"):
-                st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', '')); c1,c2,c3=st.columns(3)
+                st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', ''))
+                c1,c2,c3=st.columns(3)
                 if c1.button("♻️ Reuse", key=f"reuse_{campaign['id']}"):
                     try:
                         loaded=reuse_campaign(campaign["id"]); st.session_state["last_campaign"]=loaded["campaign"]; st.session_state["reused_content"]=loaded["content"]; st.session_state.pop("video_asset",None); st.success("Campaign loaded for reuse.")
@@ -94,12 +112,15 @@ with queue_tab:
                     try:
                         loaded=reuse_campaign(campaign["id"]); st.session_state["last_campaign"]=loaded["campaign"]; st.session_state["reused_content"]=loaded["content"]; st.success("Campaign loaded for publishing.")
                     except Exception as ex: st.error(str(ex))
+                if st.session_state.get("last_campaign",{}).get("id")==campaign["id"] and st.session_state.get("reused_content"):
+                    for item in st.session_state["reused_content"]: st.write(f"**{item.get('platform','').upper()} · {item.get('content_type','')}** — {item.get('title','')}")
+    except Exception as ex: st.warning(f"Supabase is not configured: {ex}")
 
 with media_tab:
     st.subheader("🎬 Campaign media library"); campaign=st.session_state.get("last_campaign")
     if not campaign: st.info("Select Reuse or Media on a saved campaign first.")
     else:
-        st.success(f"Active campaign: {campaign['name']}"); saved_items=st.session_state.get("reused_content",[]); youtube_item=next((x for x in saved_items if x.get("platform")=="youtube" and x.get("content_type") in ("video","long-form") and (x.get("body") or "").strip()),None); script_override=(youtube_item or {}).get("body") or campaign.get("script")
+        st.success(f"Active campaign: {campaign['name']}"); saved_items=st.session_state.get("reused_content",[]); youtube_item=next((x for x in saved_items if x.get("platform")=="youtube" and x.get("content_type")=="video" and (x.get("body") or "").strip()),None); script_override=(youtube_item or {}).get("body") or campaign.get("script")
         if not script_override: st.warning("No saved YouTube script was found for this campaign.")
         if st.button("🤖 Generate complete video automatically", type="primary"):
             try:
@@ -107,32 +128,28 @@ with media_tab:
                 with st.spinner("Generating voiceover, thumbnail and MP4..."): result=build_campaign_media(campaign, script=script_override)
                 st.session_state["video_asset"]=result.get("video_asset"); st.success("Media generated and stored in Supabase Storage.")
             except Exception as ex: st.error(str(ex))
-        uploaded=st.file_uploader("Or upload a finished video", type=["mp4","mov","webm","m4v"], key="campaign_video")
+        uploaded=st.file_uploader("Or upload a finished video",type=["mp4","mov","webm","m4v"],key="campaign_video")
         if uploaded and st.button("☁️ Store video in Supabase"):
             try: st.session_state["video_asset"]=media.upload_streamlit_file(uploaded,campaign["id"],"video"); st.success("Video stored in Supabase Storage.")
             except Exception as ex: st.error(str(ex))
-        thumb=st.file_uploader("Upload thumbnail", type=["png","jpg","jpeg","webp"], key="campaign_thumb")
-        if thumb and st.button("☁️ Store thumbnail in Supabase"):
-            try: st.success("Thumbnail stored: "+media.upload_streamlit_file(thumb,campaign["id"],"thumbnail")["public_url"])
-            except Exception as ex: st.error(str(ex))
-        if st.session_state.get("video_asset"): st.write("Stored video:",st.session_state["video_asset"].get("public_url",""))
 
 with youtube_tab:
-    st.subheader("▶️ YouTube Publisher"); campaign=st.session_state.get("last_campaign"); video_asset=st.session_state.get("video_asset")
+    st.subheader("▶️ YouTube Publisher"); campaign=st.session_state.get("last_campaign"); video_asset=st.session_state.get("video_asset"); selected=st.session_state.get("reused_content",[])
     if campaign: st.info(f"Publishing saved campaign: {campaign['name']}")
     st.success("Campaign video is ready in Supabase Storage.") if video_asset else st.info("No campaign video stored yet. Generate or upload one in Media.")
-    default_title=campaign.get("name","") if campaign else ""; default_description=content_value("youtube","description", "")
-    if not default_description and campaign: default_description=campaign.get("description","") or (campaign.get("payload") or {}).get("description","")
-    default_tags=(campaign.get("payload") or {}).get("tags",[]) if campaign else []
-    yt_title=st.text_input("Video title",value=default_title); yt_description=st.text_area("Generated YouTube description",value=default_description,height=180); yt_tags=st.text_input("Tags, comma separated",value=", ".join(default_tags)); privacy=st.selectbox("Visibility",["private","unlisted","public"])
+    yt_title=st.text_input("Video title",value=campaign.get("name","") if campaign else "")
+    generated_description=next((x.get("body","") for x in selected if x.get("platform")=="youtube" and x.get("content_type")=="description"),campaign.get("description","") if campaign else "")
+    yt_description=st.text_area("Generated YouTube description",value=generated_description,height=180)
+    yt_tags=st.text_input("Tags, comma separated",value=", ".join(campaign.get("tags",[])) if campaign else ""); privacy=st.selectbox("Visibility",["private","unlisted","public"])
     st.session_state["yt_approval"]=st.checkbox("I approve this campaign for YouTube publishing",value=st.session_state.get("yt_approval",False))
     if st.button("📤 Upload campaign to YouTube",type="primary"):
         if approval_required and not st.session_state.get("yt_approval"): st.warning("Approve the campaign before publishing.")
         elif not video_asset: st.warning("Generate or upload a video in Media first.")
-        elif not yt_description.strip(): st.warning("Generate/save a campaign with a YouTube description first.")
+        elif not yt_description.strip(): st.warning("Add a video description before publishing.")
         else:
             try:
-                import requests; data=requests.get(video_asset["public_url"],timeout=120); data.raise_for_status(); temp="/tmp/socialized_upload.mp4"
+                import requests
+                data=requests.get(video_asset["public_url"],timeout=120); data.raise_for_status(); temp="/tmp/socialized_upload.mp4"
                 with open(temp,"wb") as fh: fh.write(data.content)
                 video_id=upload_video(get_service(),temp,yt_title,yt_description,[x.strip() for x in yt_tags.split(",") if x.strip()],privacy=privacy); st.success(f"Uploaded to YouTube. Video ID: {video_id}")
             except Exception as ex: st.error(str(ex))
