@@ -6,14 +6,14 @@ from services.research import research_topics
 from services.ai import generate_package
 from services.youtube import get_service, channel_info, upload_video
 from services.x import XService
-from services.campaigns import save_campaign, recent_campaigns
+from services.campaigns import save_campaign, recent_campaigns, reuse_campaign
 from services import media
 from services.auto_media import build_campaign_media
 
 load_dotenv()
 st.set_page_config(page_title="Socialized", page_icon="📣", layout="wide")
 st.title("📣 Socialized")
-st.caption("One idea → AI campaign → automatic media → X + YouTube")
+st.caption("One idea → AI campaign → reusable campaign → automatic media → X + YouTube")
 x_service = XService()
 
 with st.sidebar:
@@ -67,21 +67,41 @@ with queue_tab:
         campaigns = recent_campaigns()
         if not campaigns: st.info("No campaigns saved yet.")
         for campaign in campaigns:
-            with st.expander(f"{campaign['name']} · {campaign['status']}"): st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', ''))
-    except Exception as ex: st.warning(f"Supabase is not configured: {ex}")
+            with st.expander(f"{campaign['name']} · {campaign['status']}"):
+                st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', ''))
+                c1, c2, c3 = st.columns(3)
+                if c1.button("♻️ Reuse", key=f"reuse_{campaign['id']}"):
+                    try:
+                        loaded = reuse_campaign(campaign["id"])
+                        st.session_state["last_campaign"] = loaded["campaign"]
+                        st.session_state["reused_content"] = loaded["content"]
+                        st.success("Campaign loaded for reuse. Open Media, YouTube or X to continue.")
+                    except Exception as ex: st.error(str(ex))
+                if c2.button("🎬 Media", key=f"media_{campaign['id']}"):
+                    st.session_state["last_campaign"] = campaign
+                    try: st.session_state["reused_content"] = reuse_campaign(campaign["id"])["content"]
+                    except Exception: pass
+                    st.success("Campaign selected for media production.")
+                if c3.button("▶️ Publish", key=f"publish_{campaign['id']}"):
+                    try:
+                        loaded = reuse_campaign(campaign["id"]); st.session_state["last_campaign"] = loaded["campaign"]; st.session_state["reused_content"] = loaded["content"]; st.success("Campaign loaded for publishing.")
+                    except Exception as ex: st.error(str(ex))
+                if st.session_state.get("last_campaign", {}).get("id") == campaign["id"] and st.session_state.get("reused_content"):
+                    st.caption("Saved content available for reuse")
+                    for item in st.session_state["reused_content"]:
+                        st.write(f"**{item.get('platform', '').upper()} · {item.get('content_type', '')}** — {item.get('title', '')}")
 
 with media_tab:
     st.subheader("🎬 Campaign media library")
     campaign = st.session_state.get("last_campaign")
-    if not campaign: st.info("Save a campaign first, then upload or generate its media here.")
+    if not campaign: st.info("Select Reuse or Media on a saved campaign first.")
     else:
         st.success(f"Active campaign: {campaign['name']}")
         if st.button("🤖 Generate complete video automatically", type="primary"):
             try:
                 with st.spinner("Generating voiceover, thumbnail and MP4..."):
                     result = build_campaign_media(campaign)
-                st.session_state["video_asset"] = result.get("video_asset")
-                st.success("Media generated and stored in Supabase Storage.")
+                st.session_state["video_asset"] = result.get("video_asset"); st.success("Media generated and stored in Supabase Storage.")
             except Exception as ex: st.error(str(ex))
         uploaded = st.file_uploader("Or upload a finished video", type=["mp4", "mov", "webm", "m4v"], key="campaign_video")
         if uploaded and st.button("☁️ Store video in Supabase"):
@@ -96,9 +116,10 @@ with media_tab:
 
 with youtube_tab:
     st.subheader("▶️ YouTube Publisher")
-    video_asset = st.session_state.get("video_asset")
+    campaign = st.session_state.get("last_campaign"); video_asset = st.session_state.get("video_asset")
+    if campaign: st.info(f"Publishing saved campaign: {campaign['name']}")
     st.success("Campaign video is ready in Supabase Storage.") if video_asset else st.info("No campaign video stored yet. Generate or upload one in Media.")
-    yt_title = st.text_input("Video title", value=st.session_state.get("last_campaign", {}).get("name", "")); yt_description = st.text_area("Description", height=140); yt_tags = st.text_input("Tags, comma separated"); privacy = st.selectbox("Visibility", ["private", "unlisted", "public"])
+    yt_title = st.text_input("Video title", value=campaign.get("name", "") if campaign else ""); yt_description = st.text_area("Description", height=140); yt_tags = st.text_input("Tags, comma separated"); privacy = st.selectbox("Visibility", ["private", "unlisted", "public"])
     st.session_state["yt_approval"] = st.checkbox("I approve this campaign for YouTube publishing", value=st.session_state.get("yt_approval", False))
     if st.button("📤 Upload campaign to YouTube", type="primary"):
         if approval_required and not st.session_state.get("yt_approval"): st.warning("Approve the campaign before publishing.")
