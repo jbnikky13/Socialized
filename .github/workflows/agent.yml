@@ -1,0 +1,23 @@
+name: Socialized Agent
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'
+
+jobs:
+  content-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Run agent health check
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          CHANNEL_NAME: ${{ vars.CHANNEL_NAME }}
+          CHANNEL_NICHE: ${{ vars.CHANNEL_NICHE }}
+        run: python -c "from services.content_agent import find_opportunities; print(find_opportunities('${{ vars.CHANNEL_NICHE }}','${{ vars.CHANNEL_NICHE }}',5))"
