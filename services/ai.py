@@ -1,9 +1,23 @@
 from __future__ import annotations
 import json
 import os
+import re
 import requests
 
-SYSTEM = """You are a YouTube and X content strategist. Create original, useful, platform-compliant content. Never invent sources or facts when source material is supplied. Return valid JSON only."""
+SYSTEM = """You are a YouTube and X content strategist. Create original, useful, platform-compliant content. Never invent sources or facts when source material is supplied. Return valid JSON only. Do not use markdown fences. Do not add trailing commas."""
+
+
+def _parse_json(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    # Gemini can occasionally emit a JavaScript-style trailing comma.
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini returned invalid JSON: {exc}. Response: {cleaned[:800]}") from exc
 
 
 def _gemini(prompt: str) -> dict:
@@ -15,18 +29,9 @@ def _gemini(prompt: str) -> dict:
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.7,
-        },
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
     }
-    # Google documents x-goog-api-key as the supported API-key header.
-    r = requests.post(
-        url,
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-        json=payload,
-        timeout=90,
-    )
+    r = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=payload, timeout=90)
     if not r.ok:
         try:
             detail = r.json().get("error", {}).get("message", r.text)
@@ -37,14 +42,10 @@ def _gemini(prompt: str) -> dict:
     candidates = data.get("candidates", [])
     if not candidates:
         raise RuntimeError("Gemini returned no candidates. Check the model, API key, and safety response.")
-    parts = candidates[0].get("content", {}).get("parts", [])
-    text = "".join(p.get("text", "") for p in parts).strip()
+    text = "".join(p.get("text", "") for p in candidates[0].get("content", {}).get("parts", [])).strip()
     if not text:
         raise RuntimeError("Gemini returned an empty response.")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Gemini returned non-JSON output: {text[:500]}") from exc
+    return _parse_json(text)
 
 
 def generate_package(topic: str, niche: str, format_name: str = "long-form", source_context: str = ""):
@@ -57,6 +58,6 @@ Research context: {source_context[:6000]}
 
 Return JSON with exactly these keys:
 idea, title_options, hook, script, description, tags, thumbnail_text, chapters, x_posts, shorts
-Rules: title_options is an array of 5 strings; tags is an array of 10-15 strings; chapters is an array of objects with time and title; x_posts is an array of 3 posts <=280 characters; shorts is an array of 3 short-form scripts; script should be original and suitable for narration; do not state uncertain claims as facts.
+Rules: title_options is an array of 5 strings; tags is an array of 10-15 strings; chapters is an array of objects with time and title; x_posts is an array of 3 posts <=280 characters; shorts is an array of 3 short-form scripts; script should be original and suitable for narration; do not state uncertain claims as facts; no trailing commas.
 """
     return _gemini(prompt)
