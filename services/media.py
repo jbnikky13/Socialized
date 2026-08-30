@@ -20,14 +20,7 @@ def validate_media(path: str, max_mb: int = 512) -> tuple[bool, str]:
 
 
 def build_asset_manifest(script: str, thumbnail_text: str, shorts: list[str] | None = None) -> dict:
-    return {
-        "script_ready": bool(script.strip()),
-        "thumbnail_text": thumbnail_text.strip(),
-        "shorts": shorts or [],
-        "voiceover": "pending",
-        "video": "pending",
-        "thumbnail": "pending",
-    }
+    return {"script_ready": bool(script.strip()), "thumbnail_text": thumbnail_text.strip(), "shorts": shorts or [], "voiceover": "pending", "video": "pending", "thumbnail": "pending"}
 
 
 def upload_asset(path: str, campaign_id: str, content_id: str | None = None, asset_type: str = "video") -> dict:
@@ -37,25 +30,28 @@ def upload_asset(path: str, campaign_id: str, content_id: str | None = None, ass
     mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
     storage_path = f"campaigns/{campaign_id}/{asset_type}/{p.name}"
     sb = client()
-    with p.open("rb") as fh:
-        sb.storage.from_(BUCKET).upload(
-            storage_path,
-            fh,
-            file_options={"content-type": mime, "upsert": "true"},
-        )
+    try:
+        with p.open("rb") as fh:
+            sb.storage.from_(BUCKET).upload(storage_path, fh, file_options={"content-type": mime, "upsert": "true"})
+    except Exception as exc:
+        raise RuntimeError(
+            f"Supabase Storage upload failed ({BUCKET}/{storage_path}). "
+            "For this server-side Streamlit app, add SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets and reboot. "
+            f"Original error: {exc}"
+        ) from exc
     public_url = sb.storage.from_(BUCKET).get_public_url(storage_path)
-    return sb.table("media_assets").insert({
-        "campaign_id": campaign_id,
-        "content_id": content_id,
-        "asset_type": asset_type,
-        "storage_path": storage_path,
-        "public_url": public_url,
-        "mime_type": mime,
-    }).execute().data[0]
+    try:
+        rows = sb.table("media_assets").insert({"campaign_id": campaign_id, "content_id": content_id, "asset_type": asset_type, "storage_path": storage_path, "public_url": public_url, "mime_type": mime}).execute().data
+    except Exception as exc:
+        raise RuntimeError(
+            "Media uploaded to Storage, but recording it in media_assets was blocked by Supabase RLS. "
+            "Add SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets and reboot. "
+            f"Original error: {exc}"
+        ) from exc
+    return rows[0]
 
 
 def upload_streamlit_file(uploaded_file, campaign_id: str, asset_type: str = "video") -> dict:
-    """Save an UploadedFile temporarily and push it to Supabase Storage."""
     suffix = Path(uploaded_file.name).suffix or ".bin"
     temp_path = Path("/tmp") / f"socialized_{campaign_id}_{asset_type}{suffix}"
     temp_path.write_bytes(uploaded_file.getbuffer())
