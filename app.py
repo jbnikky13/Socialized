@@ -5,10 +5,9 @@ from dotenv import load_dotenv
 
 from services.research import research_topics
 from services.ai import generate_package
-from services.youtube import get_service, channel_info, upload_video
+from services.youtube import get_service, channel_info
 from services.x import XService
 from services.campaigns import save_campaign, recent_campaigns
-from services.analytics import record_metric
 
 load_dotenv()
 st.set_page_config(page_title="Socialized", page_icon="📣", layout="wide")
@@ -28,11 +27,16 @@ with st.sidebar:
     if st.button("🔗 Check YouTube", use_container_width=True):
         try:
             info = channel_info(get_service())
-            st.session_state["youtube_connected"] = bool(info)
-            if info: st.success(f"Connected: {info['snippet']['title']}")
-        except Exception as e: st.error(str(e))
-    st.caption("X posting requires X_ACCESS_TOKEN.")
-    st.success("X API configured") if x_service.configured() else st.warning("X API not configured")
+            if info:
+                st.success(f"Connected: {info['snippet']['title']}")
+            else:
+                st.warning("YouTube returned no channel information.")
+        except Exception as e:
+            st.error(str(e))
+    if x_service.configured():
+        st.success("X API configured")
+    else:
+        st.warning("X API not configured")
 
 research_tab, create_tab, queue_tab, x_tab, analytics_tab = st.tabs(["🔎 Research", "✍️ Create", "📅 Campaigns", "𝕏 X", "📊 Analytics"])
 
@@ -58,12 +62,14 @@ with create_tab:
     topic = st.text_input("Topic", value=st.session_state.get("selected_topic", ""))
     context = st.text_area("Research/source notes", height=100)
     if st.button("✨ Generate campaign", type="primary"):
-        if not topic: st.warning("Enter a topic first.")
+        if not topic:
+            st.warning("Enter a topic first.")
         else:
             try:
                 with st.spinner("Generating content package..."):
                     st.session_state["package"] = generate_package(topic, niche, format_name, context)
-            except Exception as ex: st.error(str(ex))
+            except Exception as ex:
+                st.error(str(ex))
     package = st.session_state.get("package")
     if package:
         titles = package.get("title_options", [])
@@ -77,7 +83,8 @@ with create_tab:
         x_posts_text = st.text_area("X posts — one per line", "\n".join(default_x), height=150)
         x_posts = [p.strip() for p in x_posts_text.splitlines() if p.strip()]
         for i, post in enumerate(x_posts, 1):
-            if len(post) > 280: st.warning(f"X post {i} is over 280 characters.")
+            if len(post) > 280:
+                st.warning(f"X post {i} is over 280 characters.")
         if st.button("💾 Save campaign to Supabase", type="primary"):
             try:
                 pack = dict(package)
@@ -86,13 +93,15 @@ with create_tab:
                 st.session_state["last_campaign"] = campaign
                 st.success(f"Campaign saved to Supabase: {campaign['id']}")
                 st.session_state.pop("package", None)
-            except Exception as ex: st.error(str(ex))
+            except Exception as ex:
+                st.error(str(ex))
 
 with queue_tab:
     st.subheader("Persistent campaigns")
     try:
         campaigns = recent_campaigns()
-        if not campaigns: st.info("No campaigns saved yet.")
+        if not campaigns:
+            st.info("No campaigns saved yet.")
         for campaign in campaigns:
             with st.expander(f"{campaign['name']} · {campaign['status']}"):
                 st.write(f"Niche: {campaign.get('niche', '')}")
@@ -105,26 +114,33 @@ with x_tab:
     x_text = st.text_area("Post", max_chars=280, height=100)
     st.caption(f"{len(x_text)}/280 characters")
     if st.button("Post to X", type="primary"):
-        if not x_service.configured(): st.error("Set X_ACCESS_TOKEN in deployment secrets first.")
-        elif not x_text.strip(): st.warning("Enter a post.")
+        if not x_service.configured():
+            st.error("Set X_ACCESS_TOKEN in deployment secrets first.")
+        elif not x_text.strip():
+            st.warning("Enter a post.")
         else:
             try:
                 result = x_service.create_post(x_text.strip())
                 st.success(f"Posted to X: {result.get('data', {}).get('id', 'success')}")
-            except Exception as ex: st.error(str(ex))
+            except Exception as ex:
+                st.error(str(ex))
     st.divider()
     st.subheader("Thread publisher")
     thread_text = st.text_area("Thread — one post per line", height=180)
     if st.button("Publish thread"):
         posts = [x.strip() for x in thread_text.splitlines() if x.strip()]
-        if not posts: st.warning("Add at least one post.")
-        elif any(len(x) > 280 for x in posts): st.error("Every post must be 280 characters or fewer.")
-        elif not x_service.configured(): st.error("Set X_ACCESS_TOKEN first.")
+        if not posts:
+            st.warning("Add at least one post.")
+        elif any(len(x) > 280 for x in posts):
+            st.error("Every post must be 280 characters or fewer.")
+        elif not x_service.configured():
+            st.error("Set X_ACCESS_TOKEN first.")
         else:
             try:
                 results = x_service.create_thread(posts)
                 st.success(f"Published {len(results)} posts as a thread.")
-            except Exception as ex: st.error(str(ex))
+            except Exception as ex:
+                st.error(str(ex))
 
 with analytics_tab:
     st.subheader("YouTube channel")
@@ -133,11 +149,12 @@ with analytics_tab:
             info = channel_info(get_service())
             if info:
                 stats = info.get("statistics", {})
-                a,b,c = st.columns(3)
+                a, b, c = st.columns(3)
                 a.metric("Subscribers", stats.get("subscriberCount", "Hidden"))
                 b.metric("Views", stats.get("viewCount", "0"))
                 c.metric("Videos", stats.get("videoCount", "0"))
-        except Exception as ex: st.error(str(ex))
+        except Exception as ex:
+            st.error(str(ex))
 
 st.divider()
 st.caption("Socialized uses official platform APIs. Keep approval enabled until your automated workflow has been tested.")
