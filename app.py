@@ -16,6 +16,12 @@ st.title("📣 Socialized")
 st.caption("One idea → AI campaign → reusable campaign → automatic media → X + YouTube")
 x_service = XService()
 
+def reused_content_items(): return st.session_state.get("reused_content", [])
+def content_value(platform, content_type=None, fallback=""):
+    for item in reused_content_items():
+        if item.get("platform") == platform and (content_type is None or item.get("content_type") == content_type) and (item.get("body") or "").strip(): return item["body"]
+    return fallback
+
 with st.sidebar:
     st.header("Creator setup")
     channel_name = st.text_input("YouTube channel", os.getenv("CHANNEL_NAME", "My YouTube Channel"))
@@ -34,9 +40,7 @@ with st.sidebar:
 research_tab, create_tab, queue_tab, media_tab, youtube_tab, x_tab, analytics_tab = st.tabs(["🔎 Research", "✍️ Create", "📅 Campaigns", "🎬 Media", "▶️ YouTube", "𝕏 X", "📊 Analytics"])
 
 with research_tab:
-    st.subheader("Find content opportunities")
-    query = st.text_input("Search topic", value=niche)
-    limit = st.slider("Results", 5, 20, 10)
+    st.subheader("Find content opportunities"); query = st.text_input("Search topic", value=niche); limit = st.slider("Results", 5, 20, 10)
     if st.button("Research trends", type="primary"):
         with st.spinner("Collecting public RSS results..."): st.session_state["research"] = research_topics(query, limit)
     for item in st.session_state.get("research", []):
@@ -46,9 +50,7 @@ with research_tab:
             if st.button("Use topic", key=f"use_{hash(item['title'])}"): st.session_state["selected_topic"] = item["title"]
 
 with create_tab:
-    st.subheader("Create persistent X + YouTube campaign")
-    topic = st.text_input("Topic", value=st.session_state.get("selected_topic", ""))
-    context = st.text_area("Research/source notes", height=100)
+    st.subheader("Create persistent X + YouTube campaign"); topic = st.text_input("Topic", value=st.session_state.get("selected_topic", "")); context = st.text_area("Research/source notes", height=100)
     if st.button("✨ Generate campaign", type="primary"):
         if not topic: st.warning("Enter a topic first.")
         else:
@@ -57,26 +59,19 @@ with create_tab:
             except Exception as ex: st.error(str(ex))
     package = st.session_state.get("package")
     if package:
-        titles = package.get("title_options", [])
-        title = st.selectbox("YouTube title", titles if titles else [package.get("idea", topic)])
-        hook = st.text_area("Hook", package.get("hook", ""), height=80)
-        script = st.text_area("YouTube script", package.get("script", ""), height=280)
-        description = st.text_area("YouTube description", package.get("description", ""), height=150)
-        tags = st.text_input("YouTube tags", ", ".join(package.get("tags", [])))
-        thumbnail = st.text_input("Thumbnail text", package.get("thumbnail_text", ""))
+        titles = package.get("title_options", []); title = st.selectbox("YouTube title", titles if titles else [package.get("idea", topic)])
+        hook = st.text_area("Hook", package.get("hook", ""), height=80); script = st.text_area("YouTube script", package.get("script", ""), height=280)
+        description = st.text_area("YouTube description", package.get("description", ""), height=150); tags = st.text_input("YouTube tags", ", ".join(package.get("tags", []))); thumbnail = st.text_input("Thumbnail text", package.get("thumbnail_text", ""))
         x_posts = [p.strip() for p in st.text_area("X posts — one per line", "\n".join(package.get("x_posts", []) or [hook or title]), height=150).splitlines() if p.strip()]
         if st.button("💾 Save campaign to Supabase", type="primary"):
             try:
-                pack = dict(package)
-                pack.update({"title": title, "script": script.strip() or hook.strip(), "description": description, "tags": [x.strip() for x in tags.split(",") if x.strip()], "thumbnail_text": thumbnail, "x_posts": x_posts})
+                pack = dict(package); pack.update({"title": title, "script": script.strip() or hook.strip(), "description": description.strip(), "tags": [x.strip() for x in tags.split(",") if x.strip()], "thumbnail_text": thumbnail, "x_posts": x_posts})
                 if not pack["script"].strip(): raise ValueError("The generated YouTube script is empty. Generate the campaign again before saving.")
-                campaign = save_campaign(title, niche, pack)
-                campaign["script"] = pack["script"]
-                campaign["title"] = title
+                if not pack["description"].strip(): raise ValueError("The generated YouTube description is empty. Generate the campaign again before saving.")
+                campaign = save_campaign(title, niche, pack); campaign["script"] = pack["script"]; campaign["title"] = title; campaign["description"] = pack["description"]
                 st.session_state["last_campaign"] = campaign
-                st.session_state["reused_content"] = [{"platform": "youtube", "content_type": "video", "title": title, "body": pack["script"]}] + [{"platform": "x", "content_type": "post", "title": title, "body": p} for p in x_posts]
-                st.success(f"Campaign saved: {campaign['id']}")
-                st.session_state.pop("package", None)
+                st.session_state["reused_content"] = [{"platform":"youtube","content_type":"video","title":title,"body":pack["script"]},{"platform":"youtube","content_type":"description","title":title,"body":pack["description"]}] + [{"platform":"x","content_type":"post","title":title,"body":p} for p in x_posts]
+                st.success(f"Campaign saved: {campaign['id']}"); st.session_state.pop("package", None)
             except Exception as ex: st.error(str(ex))
 
 with queue_tab:
@@ -86,90 +81,75 @@ with queue_tab:
         if not campaigns: st.info("No campaigns saved yet.")
         for campaign in campaigns:
             with st.expander(f"{campaign['name']} · {campaign['status']}"):
-                st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', ''))
-                c1, c2, c3 = st.columns(3)
+                st.write(f"Niche: {campaign.get('niche', '')}"); st.caption(campaign.get('created_at', '')); c1,c2,c3=st.columns(3)
                 if c1.button("♻️ Reuse", key=f"reuse_{campaign['id']}"):
                     try:
-                        loaded = reuse_campaign(campaign["id"]); st.session_state["last_campaign"] = loaded["campaign"]; st.session_state["reused_content"] = loaded["content"]; st.session_state.pop("video_asset", None); st.success("Campaign loaded for reuse. Open Media, YouTube or X to continue.")
+                        loaded=reuse_campaign(campaign["id"]); st.session_state["last_campaign"]=loaded["campaign"]; st.session_state["reused_content"]=loaded["content"]; st.session_state.pop("video_asset",None); st.success("Campaign loaded for reuse.")
                     except Exception as ex: st.error(str(ex))
                 if c2.button("🎬 Media", key=f"media_{campaign['id']}"):
                     try:
-                        loaded = reuse_campaign(campaign["id"]); st.session_state["last_campaign"] = loaded["campaign"]; st.session_state["reused_content"] = loaded["content"]; st.session_state.pop("video_asset", None); st.success("Campaign selected for media production.")
+                        loaded=reuse_campaign(campaign["id"]); st.session_state["last_campaign"]=loaded["campaign"]; st.session_state["reused_content"]=loaded["content"]; st.session_state.pop("video_asset",None); st.success("Campaign selected for media production.")
                     except Exception as ex: st.error(str(ex))
                 if c3.button("▶️ Publish", key=f"publish_{campaign['id']}"):
                     try:
-                        loaded = reuse_campaign(campaign["id"]); st.session_state["last_campaign"] = loaded["campaign"]; st.session_state["reused_content"] = loaded["content"]; st.success("Campaign loaded for publishing.")
+                        loaded=reuse_campaign(campaign["id"]); st.session_state["last_campaign"]=loaded["campaign"]; st.session_state["reused_content"]=loaded["content"]; st.success("Campaign loaded for publishing.")
                     except Exception as ex: st.error(str(ex))
-                if st.session_state.get("last_campaign", {}).get("id") == campaign["id"] and st.session_state.get("reused_content"):
-                    st.caption("Saved content available for reuse")
-                    for item in st.session_state["reused_content"]:
-                        st.write(f"**{item.get('platform', '').upper()} · {item.get('content_type', '')}** — {item.get('title', '')}")
-                        st.text_area("Content", item.get("body", ""), key=f"reuse_body_{item.get('id', hash(item.get('body','')))}", height=90)
-    except Exception as ex: st.warning(f"Supabase is not configured: {ex}")
 
 with media_tab:
-    st.subheader("🎬 Campaign media library")
-    campaign = st.session_state.get("last_campaign")
+    st.subheader("🎬 Campaign media library"); campaign=st.session_state.get("last_campaign")
     if not campaign: st.info("Select Reuse or Media on a saved campaign first.")
     else:
-        st.success(f"Active campaign: {campaign['name']}")
-        saved_items = st.session_state.get("reused_content", [])
-        youtube_item = next((x for x in saved_items if x.get("platform") == "youtube" and x.get("content_type") in ("video", "long-form") and (x.get("body") or "").strip()), None)
-        script_override = youtube_item.get("body") if youtube_item else campaign.get("script")
-        if not script_override: st.warning("No saved YouTube script was found for this campaign. Open Create and save a campaign containing a YouTube script.")
+        st.success(f"Active campaign: {campaign['name']}"); saved_items=st.session_state.get("reused_content",[]); youtube_item=next((x for x in saved_items if x.get("platform")=="youtube" and x.get("content_type") in ("video","long-form") and (x.get("body") or "").strip()),None); script_override=(youtube_item or {}).get("body") or campaign.get("script")
+        if not script_override: st.warning("No saved YouTube script was found for this campaign.")
         if st.button("🤖 Generate complete video automatically", type="primary"):
             try:
                 if not script_override: raise ValueError("No saved YouTube script was found for this campaign. Please generate and save a YouTube script first.")
-                with st.spinner("Generating voiceover, thumbnail and MP4..."):
-                    result = build_campaign_media(campaign, script=script_override)
-                st.session_state["video_asset"] = result.get("video_asset"); st.success("Media generated and stored in Supabase Storage.")
+                with st.spinner("Generating voiceover, thumbnail and MP4..."): result=build_campaign_media(campaign, script=script_override)
+                st.session_state["video_asset"]=result.get("video_asset"); st.success("Media generated and stored in Supabase Storage.")
             except Exception as ex: st.error(str(ex))
-        uploaded = st.file_uploader("Or upload a finished video", type=["mp4", "mov", "webm", "m4v"], key="campaign_video")
+        uploaded=st.file_uploader("Or upload a finished video", type=["mp4","mov","webm","m4v"], key="campaign_video")
         if uploaded and st.button("☁️ Store video in Supabase"):
-            try:
-                asset = media.upload_streamlit_file(uploaded, campaign["id"], "video"); st.session_state["video_asset"] = asset; st.success("Video stored in Supabase Storage.")
+            try: st.session_state["video_asset"]=media.upload_streamlit_file(uploaded,campaign["id"],"video"); st.success("Video stored in Supabase Storage.")
             except Exception as ex: st.error(str(ex))
-        thumb = st.file_uploader("Upload thumbnail", type=["png", "jpg", "jpeg", "webp"], key="campaign_thumb")
+        thumb=st.file_uploader("Upload thumbnail", type=["png","jpg","jpeg","webp"], key="campaign_thumb")
         if thumb and st.button("☁️ Store thumbnail in Supabase"):
-            try:
-                asset = media.upload_streamlit_file(thumb, campaign["id"], "thumbnail"); st.success("Thumbnail stored: " + asset["public_url"])
+            try: st.success("Thumbnail stored: "+media.upload_streamlit_file(thumb,campaign["id"],"thumbnail")["public_url"])
             except Exception as ex: st.error(str(ex))
-        if st.session_state.get("video_asset"): st.write("Stored video:", st.session_state["video_asset"].get("public_url", ""))
+        if st.session_state.get("video_asset"): st.write("Stored video:",st.session_state["video_asset"].get("public_url",""))
 
 with youtube_tab:
-    st.subheader("▶️ YouTube Publisher")
-    campaign = st.session_state.get("last_campaign"); video_asset = st.session_state.get("video_asset")
+    st.subheader("▶️ YouTube Publisher"); campaign=st.session_state.get("last_campaign"); video_asset=st.session_state.get("video_asset")
     if campaign: st.info(f"Publishing saved campaign: {campaign['name']}")
     st.success("Campaign video is ready in Supabase Storage.") if video_asset else st.info("No campaign video stored yet. Generate or upload one in Media.")
-    yt_title = st.text_input("Video title", value=campaign.get("name", "") if campaign else "")
-    yt_description = st.text_area("Description", height=140); yt_tags = st.text_input("Tags, comma separated"); privacy = st.selectbox("Visibility", ["private", "unlisted", "public"])
-    st.session_state["yt_approval"] = st.checkbox("I approve this campaign for YouTube publishing", value=st.session_state.get("yt_approval", False))
-    if st.button("📤 Upload campaign to YouTube", type="primary"):
+    default_title=campaign.get("name","") if campaign else ""; default_description=content_value("youtube","description", "")
+    if not default_description and campaign: default_description=campaign.get("description","") or (campaign.get("payload") or {}).get("description","")
+    default_tags=(campaign.get("payload") or {}).get("tags",[]) if campaign else []
+    yt_title=st.text_input("Video title",value=default_title); yt_description=st.text_area("Generated YouTube description",value=default_description,height=180); yt_tags=st.text_input("Tags, comma separated",value=", ".join(default_tags)); privacy=st.selectbox("Visibility",["private","unlisted","public"])
+    st.session_state["yt_approval"]=st.checkbox("I approve this campaign for YouTube publishing",value=st.session_state.get("yt_approval",False))
+    if st.button("📤 Upload campaign to YouTube",type="primary"):
         if approval_required and not st.session_state.get("yt_approval"): st.warning("Approve the campaign before publishing.")
         elif not video_asset: st.warning("Generate or upload a video in Media first.")
+        elif not yt_description.strip(): st.warning("Generate/save a campaign with a YouTube description first.")
         else:
             try:
-                import requests
-                data = requests.get(video_asset["public_url"], timeout=120); data.raise_for_status(); temp = "/tmp/socialized_upload.mp4"
-                with open(temp, "wb") as fh: fh.write(data.content)
-                video_id = upload_video(get_service(), temp, yt_title, yt_description, [x.strip() for x in yt_tags.split(",") if x.strip()], privacy=privacy); st.success(f"Uploaded to YouTube. Video ID: {video_id}")
+                import requests; data=requests.get(video_asset["public_url"],timeout=120); data.raise_for_status(); temp="/tmp/socialized_upload.mp4"
+                with open(temp,"wb") as fh: fh.write(data.content)
+                video_id=upload_video(get_service(),temp,yt_title,yt_description,[x.strip() for x in yt_tags.split(",") if x.strip()],privacy=privacy); st.success(f"Uploaded to YouTube. Video ID: {video_id}")
             except Exception as ex: st.error(str(ex))
 
 with x_tab:
-    st.subheader("𝕏 Publisher")
-    selected_content = st.session_state.get("reused_content", []); default_x = next((x.get("body", "") for x in selected_content if x.get("platform") == "x"), "")
-    x_text = st.text_area("Post", value=default_x, max_chars=280, height=100); st.caption(f"{len(x_text)}/280 characters")
-    if st.button("Post to X", type="primary"):
+    st.subheader("𝕏 Publisher"); default_x=content_value("x",fallback=""); x_text=st.text_area("Post",value=default_x,max_chars=280,height=100); st.caption(f"{len(x_text)}/280 characters")
+    if st.button("Post to X",type="primary"):
         if not x_service.configured(): st.error("Set X_ACCESS_TOKEN in secrets first.")
         elif not x_text.strip(): st.warning("Enter a post.")
         else:
-            try: st.success(f"Posted to X: {x_service.create_post(x_text.strip()).get('data', {}).get('id', 'success')}")
+            try: st.success(f"Posted to X: {x_service.create_post(x_text.strip()).get('data',{}).get('id','success')}")
             except Exception as ex: st.error(str(ex))
-    st.divider(); st.subheader("Thread publisher"); thread_text = st.text_area("Thread — one post per line", height=180)
+    st.divider(); st.subheader("Thread publisher"); thread_text=st.text_area("Thread — one post per line",height=180)
     if st.button("Publish thread"):
-        posts = [x.strip() for x in thread_text.splitlines() if x.strip()]
+        posts=[x.strip() for x in thread_text.splitlines() if x.strip()]
         if not posts: st.warning("Add at least one post.")
-        elif any(len(x) > 280 for x in posts): st.error("Every post must be 280 characters or fewer.")
+        elif any(len(x)>280 for x in posts): st.error("Every post must be 280 characters or fewer.")
         elif not x_service.configured(): st.error("Set X_ACCESS_TOKEN first.")
         else:
             try: st.success(f"Published {len(x_service.create_thread(posts))} posts as a thread.")
@@ -179,9 +159,9 @@ with analytics_tab:
     st.subheader("YouTube channel")
     if st.button("Refresh YouTube stats"):
         try:
-            info = channel_info(get_service())
+            info=channel_info(get_service())
             if info:
-                stats = info.get("statistics", {}); a, b, c = st.columns(3); a.metric("Subscribers", stats.get("subscriberCount", "Hidden")); b.metric("Views", stats.get("viewCount", "0")); c.metric("Videos", stats.get("videoCount", "0"))
+                stats=info.get("statistics",{}); a,b,c=st.columns(3); a.metric("Subscribers",stats.get("subscriberCount","Hidden")); b.metric("Views",stats.get("viewCount","0")); c.metric("Videos",stats.get("videoCount","0"))
         except Exception as ex: st.error(str(ex))
 
 st.divider(); st.caption("Socialized uses official platform APIs. Keep approval enabled until automated publishing is tested.")
