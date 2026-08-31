@@ -11,6 +11,7 @@ from googleapiclient.http import MediaFileUpload
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"]
 CLIENT_FILE = Path("client_secret.json")
 TOKEN_FILE = Path("token.json")
+DEFAULT_REDIRECT_URI = "https://socialized.streamlit.app/"
 
 
 def _secret_json(name):
@@ -34,20 +35,14 @@ def _client_config():
 
 
 def _redirect_uri():
-    try:
-        import streamlit as st
-        return st.context.url.split("?")[0]
-    except Exception:
-        return os.getenv("GOOGLE_REDIRECT_URI", "")
+    """Use one deterministic callback URL for Google OAuth."""
+    return os.getenv("GOOGLE_REDIRECT_URI") or DEFAULT_REDIRECT_URI
 
 
 def begin_oauth():
-    """Start YouTube OAuth and force Google to show the account chooser."""
+    """Start YouTube OAuth and always show Google's account chooser."""
     redirect_uri = _redirect_uri()
-    if not redirect_uri:
-        raise RuntimeError("Set GOOGLE_REDIRECT_URI to your deployed Streamlit app URL.")
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    # select_account ensures users with multiple Google accounts can choose the account/channel.
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
@@ -84,7 +79,7 @@ def get_service(token_json=None):
                 except Exception:
                     pass
         else:
-            raise RuntimeError("YouTube is not connected. Approve the campaign and authorize the selected Google account.")
+            raise RuntimeError("YouTube is not connected. Choose a Google account and authorize YouTube.")
     return build("youtube", "v3", credentials=creds)
 
 
@@ -106,7 +101,8 @@ def upload_video(youtube, video_path, title, description, tags, privacy="private
     body = {"snippet": {"title": title[:100], "description": description[:5000], "tags": tags[:500], "categoryId": category_id}, "status": {"privacyStatus": "private" if publish_at else privacy}}
     if publish_at:
         dt = datetime.fromisoformat(publish_at.replace("Z", "+00:00"))
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         body["status"]["publishAt"] = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     media = MediaFileUpload(video_path, chunksize=8 * 1024 * 1024, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
