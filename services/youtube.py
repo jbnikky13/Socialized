@@ -8,10 +8,13 @@ import secrets
 import time
 from pathlib import Path
 from datetime import datetime, timezone
+
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+from services.db import client
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly"]
 CLIENT_FILE = Path("client_secret.json")
@@ -45,20 +48,18 @@ def _redirect_uri():
 
 
 def _state_secret():
-    """Use a dedicated secret when supplied; otherwise derive one from the OAuth client secret."""
     configured = _secret_json("GOOGLE_OAUTH_STATE_SECRET")
     if configured:
         return str(configured).encode("utf-8")
     config = _client_config()
-    client = config.get("web") or config.get("installed") or config
-    secret = client.get("client_secret")
+    client_config = config.get("web") or config.get("installed") or config
+    secret = client_config.get("client_secret")
     if not secret:
         raise RuntimeError("Google OAuth client secret is missing from GOOGLE_CLIENT_JSON.")
     return str(secret).encode("utf-8")
 
 
 def _make_state():
-    """Create a signed OAuth state so the callback can be verified even after Streamlit reconnects."""
     nonce = secrets.token_urlsafe(24)
     issued = str(int(time.time()))
     payload = f"{issued}.{nonce}"
@@ -81,120 +82,167 @@ def _validate_state(state):
     if abs(int(time.time()) - issued_at) > OAUTH_STATE_MAX_AGE:
         raise RuntimeError("The Google authorization request expired. Please connect YouTube again.")
     payload = f"{issued}.{nonce}"
-    expected = base64.urlsafe_b64encode(
-        hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()
-    ).decode("ascii").rstrip("=")
+    expected = base64.urlsafe_b64encode(hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()).decode("ascii").rstrip("=")
     if not hmac.compare_digest(signature, expected):
         raise RuntimeError("Invalid OAuth state. Please start the YouTube connection again.")
 
 
+def _token_cipher():
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as exc:
+        raise RuntimeError("cryptography is required for secure persistent YouTube connections.") from exc
+    secret = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY")
+    if not secret:
+        raise RuntimeError("A server-side Supabase key is required for persistent YouTube connections.")
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+    return Fernet(key)
+
+
+def _encrypt_token(token_json: str) -> str:
+    return _token_cipher().encrypt(token_json.encode("utf-8")).decode("utf-8")
+
+
+def _decrypt_token(value: str) -> str:
+    return _token_cipher().decrypt(value.encode("utf-8")).decode("utf-8")
+
+
 def begin_oauth():
-    """Start YouTube OAuth and always show Google's account chooser."""
     redirect_uri = _redirect_uri()
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
     state = _make_state()
-    authorization_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="select_account consent",
-        state=state,
-    )
+    authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="select_account consent", state=state)
     return authorization_url, state
 
 
+def _channel_connection(info: dict) -> dict:
+    snippet = info.get("snippet", {})
+    return {"channel_id": info.get("id"), "channel_title": snippet.get("title", "YouTube channel"), "custom_url": snippet.get("customUrl", ""), "thumbnail": (snippet.get("thumbnails", {}).get("default", {}) or {}).get("url", "")}
+
+
+def save_connection(connection: dict, token_json: str) -> None:
+    row = {"channel_id": connection["channel_id"], "channel_title": connection["channel_title"], "custom_url": connection.get("custom_url", ""), "thumbnail": connection.get("thumbnail", ""), "token_json": _encrypt_token(token_json), "updated_at": datetime.now(timezone.utc).isoformat()}
+    client().table("youtube_connections").upsert(row, on_conflict="channel_id").execute()
+
+
+def list_connections() -> list[dict]:
+    return client().table("youtube_connections").select("channel_id,channel_title,custom_url,thumbnail,updated_at").order("updated_at", desc=True).execute().data
+
+
+def load_connection(channel_id: str) -> str:
+    rows = client().table("youtube_connections").select("token_json").eq("channel_id", channel_id).limit(1).execute().data
+    if not rows:
+        raise RuntimeError("Saved YouTube connection not found. Choose the Google account again.")
+    return _decrypt_token(rows[0]["token_json"])
+
+
+def delete_connection(channel_id: str) -> None:
+    client().table("youtube_connections").delete().eq("channel_id", channel_id).execute()
+    if _session().get("youtube_channel_id") == channel_id:
+        for key in ("youtube_channel_id", "youtube_channel", "youtube_connected", "google_token_json"):
+            _session().pop(key, None)
+
+
+def set_active_connection(channel_id: str) -> dict:
+    token_json = load_connection(channel_id)
+    creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        token_json = creds.to_json()
+    if not creds.valid:
+        raise RuntimeError("Saved YouTube authorization is no longer valid. Reconnect this account.")
+    youtube = build("youtube", "v3", credentials=creds)
+    info = channel_info(youtube)
+    if not info:
+        raise RuntimeError("The saved Google account no longer has an accessible YouTube channel.")
+    connection = _channel_connection(info)
+    save_connection(connection, token_json)
+    s = _session()
+    s["google_token_json"] = token_json
+    s["youtube_connected"] = True
+    s["youtube_channel"] = connection
+    s["youtube_channel_id"] = channel_id
+    return connection
+
+
 def finish_oauth(code, state):
-    """Exchange the OAuth code, save credentials, and identify the selected YouTube channel."""
-    import streamlit as st
     _validate_state(state)
     redirect_uri = _redirect_uri()
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, state=state, redirect_uri=redirect_uri)
     flow.fetch_token(code=code)
     token_json = flow.credentials.to_json()
-    st.session_state["google_token_json"] = token_json
-
     youtube = build("youtube", "v3", credentials=flow.credentials)
     info = channel_info(youtube)
     if not info:
-        st.session_state.pop("youtube_connected", None)
-        st.session_state.pop("youtube_channel", None)
-        raise RuntimeError(
-            "Google authorization succeeded, but this Google account has no YouTube channel. "
-            "Create or select a YouTube channel for this account and try again."
-        )
-
-    snippet = info.get("snippet", {})
-    connection = {
-        "channel_id": info.get("id"),
-        "channel_title": snippet.get("title", "YouTube channel"),
-        "custom_url": snippet.get("customUrl", ""),
-        "thumbnail": (snippet.get("thumbnails", {}).get("default", {}) or {}).get("url", ""),
-    }
-    st.session_state["youtube_connected"] = True
-    st.session_state["youtube_channel"] = connection
+        raise RuntimeError("Google authorization succeeded, but this Google account has no accessible YouTube channel. Create or select a YouTube channel and try again.")
+    connection = _channel_connection(info)
+    save_connection(connection, token_json)
+    s = _session()
+    s["google_token_json"] = token_json
+    s["youtube_connected"] = True
+    s["youtube_channel"] = connection
+    s["youtube_channel_id"] = connection["channel_id"]
     return token_json, connection
 
 
+def _session():
+    import streamlit as st
+    return st.session_state
+
+
 def _complete_pending_callback():
-    """Complete a Google callback even if Streamlit created a fresh WebSocket session."""
-    try:
-        import streamlit as st
-        params = st.query_params
-        code = params.get("code")
-        state = params.get("state")
-        if not code or not state:
-            return None
-        result = finish_oauth(code, state)
-        st.query_params.clear()
-        return result
-    except Exception:
-        raise
+    params = _session_query_params()
+    code = params.get("code")
+    state = params.get("state")
+    if not code or not state:
+        return None
+    result = finish_oauth(code, state)
+    _session_query_params().clear()
+    return result
+
+
+def _session_query_params():
+    import streamlit as st
+    return st.query_params
 
 
 def get_service(token_json=None):
-    # OAuth redirects can create a new Streamlit session, so the old
-    # st.session_state youtube_oauth_state may no longer exist. Complete the
-    # callback from the URL before looking for an existing token.
-    try:
-        callback_result = _complete_pending_callback()
-        if callback_result:
-            token_json = callback_result[0]
-    except Exception:
-        # Only suppress callback processing when there is no callback in the URL.
-        # If code/state were present, surface the actual authorization error.
-        try:
-            import streamlit as st
-            if st.query_params.get("code") or st.query_params.get("state"):
-                raise
-        except ImportError:
-            pass
-
-    creds = None
-    token_json = token_json or st_session_token()
-    if token_json:
-        creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-    elif TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            from google.auth.transport.requests import Request
-            creds.refresh(Request())
-            if token_json:
-                try:
-                    import streamlit as st
-                    st.session_state["google_token_json"] = creds.to_json()
-                except Exception:
-                    pass
-        else:
-            raise RuntimeError("YouTube is not connected. Choose a Google account and authorize YouTube.")
+    callback_result = _complete_pending_callback()
+    if callback_result:
+        token_json = callback_result[0]
+    s = _session()
+    token_json = token_json or s.get("google_token_json")
+    if not token_json and s.get("youtube_channel_id"):
+        token_json = load_connection(s["youtube_channel_id"])
+    if not token_json:
+        raise RuntimeError("YouTube is not connected. Choose a Google account and authorize YouTube.")
+    creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+    if creds.expired and creds.refresh_token:
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
+        token_json = creds.to_json()
+        s["google_token_json"] = token_json
+        if s.get("youtube_channel"):
+            save_connection(s["youtube_channel"], token_json)
+    if not creds.valid:
+        raise RuntimeError("YouTube authorization has expired. Choose the Google account again.")
     return build("youtube", "v3", credentials=creds)
 
 
-def st_session_token():
+def restore_saved_connection(channel_id: str | None = None) -> dict | None:
+    """Restore the previously selected channel after a Streamlit session restart."""
     try:
-        import streamlit as st
-        return st.session_state.get("google_token_json") or _secret_json("GOOGLE_TOKEN_JSON")
+        connections = list_connections()
     except Exception:
-        return _secret_json("GOOGLE_TOKEN_JSON")
+        return None
+    if not connections:
+        return None
+    selected = channel_id or _session().get("youtube_channel_id") or connections[0]["channel_id"]
+    try:
+        return set_active_connection(selected)
+    except Exception:
+        return None
 
 
 def channel_info(youtube):
