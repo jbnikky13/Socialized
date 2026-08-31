@@ -1,6 +1,11 @@
 from __future__ import annotations
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from google_auth_oauthlib.flow import Flow
@@ -12,6 +17,7 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googlea
 CLIENT_FILE = Path("client_secret.json")
 TOKEN_FILE = Path("token.json")
 DEFAULT_REDIRECT_URI = "https://socialized.streamlit.app/"
+OAUTH_STATE_MAX_AGE = 10 * 60
 
 
 def _secret_json(name):
@@ -35,18 +41,63 @@ def _client_config():
 
 
 def _redirect_uri():
-    """Use one deterministic callback URL for Google OAuth."""
     return os.getenv("GOOGLE_REDIRECT_URI") or DEFAULT_REDIRECT_URI
+
+
+def _state_secret():
+    """Use a dedicated secret when supplied; otherwise derive one from the OAuth client secret."""
+    configured = _secret_json("GOOGLE_OAUTH_STATE_SECRET")
+    if configured:
+        return str(configured).encode("utf-8")
+    config = _client_config()
+    client = config.get("web") or config.get("installed") or config
+    secret = client.get("client_secret")
+    if not secret:
+        raise RuntimeError("Google OAuth client secret is missing from GOOGLE_CLIENT_JSON.")
+    return str(secret).encode("utf-8")
+
+
+def _make_state():
+    """Create a signed OAuth state so the callback can be verified even after Streamlit reconnects."""
+    nonce = secrets.token_urlsafe(24)
+    issued = str(int(time.time()))
+    payload = f"{issued}.{nonce}"
+    signature = hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()
+    encoded = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{payload}.{encoded}"
+
+
+def _validate_state(state):
+    if not state:
+        raise RuntimeError("Missing OAuth state. Please start the YouTube connection again.")
+    parts = state.split(".")
+    if len(parts) != 3:
+        raise RuntimeError("Invalid OAuth state. Please start the YouTube connection again.")
+    issued, nonce, signature = parts
+    try:
+        issued_at = int(issued)
+    except ValueError as exc:
+        raise RuntimeError("Invalid OAuth state timestamp.") from exc
+    if abs(int(time.time()) - issued_at) > OAUTH_STATE_MAX_AGE:
+        raise RuntimeError("The Google authorization request expired. Please connect YouTube again.")
+    payload = f"{issued}.{nonce}"
+    expected = base64.urlsafe_b64encode(
+        hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(signature, expected):
+        raise RuntimeError("Invalid OAuth state. Please start the YouTube connection again.")
 
 
 def begin_oauth():
     """Start YouTube OAuth and always show Google's account chooser."""
     redirect_uri = _redirect_uri()
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    authorization_url, state = flow.authorization_url(
+    state = _make_state()
+    authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="select_account consent",
+        state=state,
     )
     return authorization_url, state
 
@@ -54,14 +105,13 @@ def begin_oauth():
 def finish_oauth(code, state):
     """Exchange the OAuth code, save credentials, and identify the selected YouTube channel."""
     import streamlit as st
+    _validate_state(state)
     redirect_uri = _redirect_uri()
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, state=state, redirect_uri=redirect_uri)
     flow.fetch_token(code=code)
     token_json = flow.credentials.to_json()
     st.session_state["google_token_json"] = token_json
 
-    # Verify the newly authorized account immediately. Google account selection can
-    # succeed even when the selected Google account has no YouTube channel.
     youtube = build("youtube", "v3", credentials=flow.credentials)
     info = channel_info(youtube)
     if not info:
@@ -81,11 +131,43 @@ def finish_oauth(code, state):
     }
     st.session_state["youtube_connected"] = True
     st.session_state["youtube_channel"] = connection
-    st.success(f"YouTube connected: {connection['channel_title']}")
     return token_json, connection
 
 
+def _complete_pending_callback():
+    """Complete a Google callback even if Streamlit created a fresh WebSocket session."""
+    try:
+        import streamlit as st
+        params = st.query_params
+        code = params.get("code")
+        state = params.get("state")
+        if not code or not state:
+            return None
+        result = finish_oauth(code, state)
+        st.query_params.clear()
+        return result
+    except Exception:
+        raise
+
+
 def get_service(token_json=None):
+    # OAuth redirects can create a new Streamlit session, so the old
+    # st.session_state youtube_oauth_state may no longer exist. Complete the
+    # callback from the URL before looking for an existing token.
+    try:
+        callback_result = _complete_pending_callback()
+        if callback_result:
+            token_json = callback_result[0]
+    except Exception:
+        # Only suppress callback processing when there is no callback in the URL.
+        # If code/state were present, surface the actual authorization error.
+        try:
+            import streamlit as st
+            if st.query_params.get("code") or st.query_params.get("state"):
+                raise
+        except ImportError:
+            pass
+
     creds = None
     token_json = token_json or st_session_token()
     if token_json:
