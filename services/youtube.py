@@ -59,22 +59,33 @@ def _state_secret():
     return str(secret).encode("utf-8")
 
 
-def _make_state():
+def _state_cipher():
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as exc:
+        raise RuntimeError("cryptography is required for secure OAuth state handling.") from exc
+    key = base64.urlsafe_b64encode(hashlib.sha256(_state_secret()).digest())
+    return Fernet(key)
+
+
+def _make_state(code_verifier: str):
+    """Create a signed state and encrypt the PKCE verifier so it survives OAuth redirects."""
     nonce = secrets.token_urlsafe(24)
     issued = str(int(time.time()))
     payload = f"{issued}.{nonce}"
     signature = hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()
-    encoded = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
-    return f"{payload}.{encoded}"
+    encoded_sig = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    encrypted_verifier = _state_cipher().encrypt(code_verifier.encode("utf-8")).decode("ascii")
+    return f"{payload}.{encoded_sig}.{encrypted_verifier}"
 
 
 def _validate_state(state):
     if not state:
         raise RuntimeError("Missing OAuth state. Please start the YouTube connection again.")
-    parts = state.split(".")
-    if len(parts) != 3:
+    parts = state.split(".", 3)
+    if len(parts) != 4:
         raise RuntimeError("Invalid OAuth state. Please start the YouTube connection again.")
-    issued, nonce, signature = parts
+    issued, nonce, signature, encrypted_verifier = parts
     try:
         issued_at = int(issued)
     except ValueError as exc:
@@ -85,6 +96,13 @@ def _validate_state(state):
     expected = base64.urlsafe_b64encode(hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).digest()).decode("ascii").rstrip("=")
     if not hmac.compare_digest(signature, expected):
         raise RuntimeError("Invalid OAuth state. Please start the YouTube connection again.")
+    try:
+        verifier = _state_cipher().decrypt(encrypted_verifier.encode("ascii")).decode("utf-8")
+    except Exception as exc:
+        raise RuntimeError("The OAuth PKCE verifier could not be recovered. Please start the YouTube connection again.") from exc
+    if not 43 <= len(verifier) <= 128:
+        raise RuntimeError("Invalid OAuth PKCE verifier. Please start the YouTube connection again.")
+    return verifier
 
 
 def _token_cipher():
@@ -109,9 +127,16 @@ def _decrypt_token(value: str) -> str:
 
 def begin_oauth():
     redirect_uri = _redirect_uri()
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    state = _make_state()
-    authorization_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="select_account consent", state=state)
+    code_verifier = secrets.token_urlsafe(64)
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri, code_verifier=code_verifier)
+    state = _make_state(code_verifier)
+    authorization_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="select_account consent",
+        state=state,
+        code_challenge_method="S256",
+    )
     return authorization_url, state
 
 
@@ -167,10 +192,10 @@ def set_active_connection(channel_id: str) -> dict:
 
 
 def finish_oauth(code, state):
-    _validate_state(state)
+    code_verifier = _validate_state(state)
     redirect_uri = _redirect_uri()
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, state=state, redirect_uri=redirect_uri)
-    flow.fetch_token(code=code)
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, state=state, redirect_uri=redirect_uri, code_verifier=code_verifier)
+    flow.fetch_token(code=code, code_verifier=code_verifier)
     token_json = flow.credentials.to_json()
     youtube = build("youtube", "v3", credentials=flow.credentials)
     info = channel_info(youtube)
