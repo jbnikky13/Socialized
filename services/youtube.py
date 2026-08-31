@@ -42,11 +42,17 @@ def _redirect_uri():
 
 
 def begin_oauth():
+    """Start YouTube OAuth and force Google to show the account chooser."""
     redirect_uri = _redirect_uri()
     if not redirect_uri:
         raise RuntimeError("Set GOOGLE_REDIRECT_URI to your deployed Streamlit app URL.")
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=redirect_uri)
-    authorization_url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+    # select_account ensures users with multiple Google accounts can choose the account/channel.
+    authorization_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="select_account consent",
+    )
     return authorization_url, state
 
 
@@ -78,7 +84,7 @@ def get_service(token_json=None):
                 except Exception:
                     pass
         else:
-            raise RuntimeError("YouTube is not connected. Click Connect YouTube and complete Google authorization.")
+            raise RuntimeError("YouTube is not connected. Approve the campaign and authorize the selected Google account.")
     return build("youtube", "v3", credentials=creds)
 
 
