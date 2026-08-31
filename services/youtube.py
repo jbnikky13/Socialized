@@ -52,13 +52,37 @@ def begin_oauth():
 
 
 def finish_oauth(code, state):
+    """Exchange the OAuth code, save credentials, and identify the selected YouTube channel."""
     import streamlit as st
     redirect_uri = _redirect_uri()
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES, state=state, redirect_uri=redirect_uri)
     flow.fetch_token(code=code)
     token_json = flow.credentials.to_json()
     st.session_state["google_token_json"] = token_json
-    return token_json
+
+    # Verify the newly authorized account immediately. Google account selection can
+    # succeed even when the selected Google account has no YouTube channel.
+    youtube = build("youtube", "v3", credentials=flow.credentials)
+    info = channel_info(youtube)
+    if not info:
+        st.session_state.pop("youtube_connected", None)
+        st.session_state.pop("youtube_channel", None)
+        raise RuntimeError(
+            "Google authorization succeeded, but this Google account has no YouTube channel. "
+            "Create or select a YouTube channel for this account and try again."
+        )
+
+    snippet = info.get("snippet", {})
+    connection = {
+        "channel_id": info.get("id"),
+        "channel_title": snippet.get("title", "YouTube channel"),
+        "custom_url": snippet.get("customUrl", ""),
+        "thumbnail": (snippet.get("thumbnails", {}).get("default", {}) or {}).get("url", ""),
+    }
+    st.session_state["youtube_connected"] = True
+    st.session_state["youtube_channel"] = connection
+    st.success(f"YouTube connected: {connection['channel_title']}")
+    return token_json, connection
 
 
 def get_service(token_json=None):
