@@ -11,7 +11,7 @@ from services.media import upload_asset
 
 st.set_page_config(page_title="AI Microdrama | Socialized", page_icon="🎥", layout="wide")
 st.title("🎥 AI Photoreal Microdrama")
-st.caption("Campaign/story → scenes → Kling or MiniMax → finished video → Supabase → YouTube")
+st.caption("Campaign/story → scenes → AI video → finished video → Supabase → YouTube")
 
 campaign = st.session_state.get("last_campaign") or {}
 reused = st.session_state.get("reused_content", [])
@@ -29,7 +29,8 @@ with st.sidebar:
         help="Kling uses the API key issued by the Kling Open Platform.",
     )
     if provider == "Kling 2.5 Turbo":
-        options = ["720P", "2K"]
+        # Kling 2.5 Turbo API pricing is currently listed for 720P and 1080P.
+        options = ["720P", "1080P"]
         ratio_options = ["16:9", "9:16", "1:1"]
         credential_label = "KLING_API_KEY"
     else:
@@ -45,8 +46,11 @@ with st.sidebar:
     else:
         st.warning(f"Add {credential_label} to Streamlit Secrets")
 
-    if provider == "Kling 2.5 Turbo" and st.secrets.get("KLING_WEBHOOK_SECRET", ""):
-        st.caption("✓ Kling webhook secret detected")
+    if provider == "Kling 2.5 Turbo":
+        st.caption("Kling 2.5 Turbo API: $0.042/sec at 720P or $0.07/sec at 1080P.")
+        st.info("Kling's free Studio plan does not mean unlimited free API generation. The API is usage-billed; promotional credits may be available on your account.")
+        if st.secrets.get("KLING_WEBHOOK_SECRET", ""):
+            st.caption("✓ Kling webhook secret detected")
 
 st.subheader("1. Episode")
 title = st.text_input("Episode title", value=default_title)
@@ -82,14 +86,19 @@ for i in range(int(scene_count)):
         action = st.text_area("Action + camera", key=f"vp_action_{i}", height=70)
         dialogue = st.text_area("Exact dialogue", key=f"vp_dialogue_{i}", height=70)
         duration = st.slider("Duration", 5, 10, 5, key=f"vp_duration_{i}")
+        audio_note = (
+            "The spoken dialogue is a script cue only; do not attempt to render speech audio. Preserve the intended facial expression and mouth movement for later audio/lip-sync."
+            if provider == "Kling 2.5 Turbo"
+            else "Speak the supplied dialogue naturally and synchronize mouth movement and facial expression to the words; do not paraphrase or invent dialogue."
+        )
         prompt = (
             "Photorealistic live-action microdrama. Natural human skin, realistic eyes, hair, hands and body movement. "
             "Cinematic believable lighting. Preserve recurring character identity from reference images. No cartoon, illustration, "
             "warped faces, extra fingers, text overlays or baked-in subtitles. "
             f"SETTING: {setting}. CHARACTERS: {', '.join(selected)}. "
             f"DETAILS: {'; '.join(c['name'] + ': ' + c['description'] for c in characters if c['name'] in selected and c['description'])}. "
-            f"ACTION/CAMERA: {action}. Exact spoken dialogue: {dialogue or '[No spoken dialogue]'}. "
-            "Speak the supplied dialogue naturally and synchronize mouth movement and facial expression to the words; do not paraphrase or invent dialogue."
+            f"ACTION/CAMERA: {action}. Exact dialogue/script cue: {dialogue or '[No spoken dialogue]'}. "
+            f"{audio_note}"
         )
         refs = [c["reference"] for c in characters if c["name"] in selected and c["reference"]]
         scenes.append({"prompt": prompt, "references": refs, "duration": int(duration)})
@@ -99,6 +108,8 @@ cost = sum(estimate(provider, s["duration"], resolution) for s in scenes)
 st.divider()
 st.metric("Estimated generation cost", f"${cost:.2f}", f"{seconds}s total • {provider}")
 st.caption("Estimate covers video generation only. Provider prices can change.")
+if provider == "Kling 2.5 Turbo":
+    st.caption("Kling 2.5 Turbo has no native audio. Spoken dialogue requires a separate TTS/lip-sync stage or a native-audio Kling model.")
 if cost > 10:
     st.warning("Estimated cost is above $10. Consider fewer/shorter scenes or the cheaper provider.")
 
