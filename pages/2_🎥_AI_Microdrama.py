@@ -8,7 +8,7 @@ from services.media import upload_asset
 
 st.set_page_config(page_title="AI Microdrama | Socialized", page_icon="🎥", layout="wide")
 st.title("🎥 AI Photoreal Microdrama")
-st.caption("Campaign/story → scenes → choose provider → photoreal video → Supabase → YouTube")
+st.caption("Campaign/story → scenes → Kling or MiniMax → finished video → Supabase → YouTube")
 
 campaign = st.session_state.get("last_campaign") or {}
 reused = st.session_state.get("reused_content", [])
@@ -17,11 +17,11 @@ default_title = campaign.get("title") or campaign.get("name") or "AI Microdrama"
 
 with st.sidebar:
     st.subheader("⚙️ Video engine")
-    provider = st.selectbox("Provider", ["Wan 2.1", "Kling 2.5 Turbo", "MiniMax H3"], help="Wan is the budget option, Kling is balanced, MiniMax H3 is premium.")
-    options = ["480P", "720P"] if provider == "Wan 2.1" else (["720P", "2K"] if provider == "Kling 2.5 Turbo" else ["768P", "2K"])
+    provider = st.selectbox("Provider", ["Kling 2.5 Turbo", "MiniMax H3"], help="Kling is the lower-cost option; MiniMax H3 is the premium option.")
+    options = ["720P", "2K"] if provider == "Kling 2.5 Turbo" else ["768P", "2K"]
     resolution = st.selectbox("Resolution", options)
     ratio = st.selectbox("Format", ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"])
-    key_name = {"MiniMax H3":"MINIMAX_API_KEY", "Kling 2.5 Turbo":"KLING_API_KEY", "Wan 2.1":"FAL_KEY"}[provider]
+    key_name = "KLING_API_KEY" if provider == "Kling 2.5 Turbo" else "MINIMAX_API_KEY"
     if available(provider): st.success(f"{provider} API key detected")
     else: st.warning(f"Add {key_name} to Streamlit Secrets")
 
@@ -58,7 +58,7 @@ for i in range(int(scene_count)):
 seconds=sum(s["duration"] for s in scenes); cost=sum(estimate(provider,s["duration"],resolution) for s in scenes)
 st.divider(); st.metric("Estimated generation cost",f"${cost:.2f}",f"{seconds}s total • {provider}")
 st.caption("Estimate covers video generation only. Provider prices can change.")
-if cost>10: st.warning("Estimated cost is above $10. Consider fewer/shorter scenes or a cheaper provider.")
+if cost>10: st.warning("Estimated cost is above $10. Consider fewer/shorter scenes or the cheaper provider.")
 missing=[c["name"] for c in characters if not c["reference"]]
 if missing: st.warning("Add reference images for: "+", ".join(missing))
 
@@ -67,7 +67,7 @@ if st.button("🚀 Generate Episode",type="primary",use_container_width=True,dis
     try:
         for idx,scene in enumerate(scenes,1):
             status.info(f"Generating scene {idx}/{len(scenes)} with {provider}...")
-            url=create_and_wait(provider,scene["prompt"],scene["references"],scene["duration"],resolution)
+            url=create_and_wait(provider,scene["prompt"],scene["references"],scene["duration"],resolution,ratio)
             clip=work/f"scene_{idx:02d}.mp4"; download(url,clip); clips.append(clip); progress.progress(int(idx/len(scenes)*100))
         final=work/"microdrama_episode.mp4"; stitch(clips,final); data=final.read_bytes()
         st.success(f"Episode ready — {seconds} seconds generated with {provider}."); st.video(data)
@@ -76,6 +76,7 @@ if st.button("🚀 Generate Episode",type="primary",use_container_width=True,dis
             asset=upload_asset(str(final),str(campaign["id"]),asset_type="video"); st.session_state["video_asset"]=asset; st.success("Video attached to the active campaign. Open YouTube to review/publish.")
     except Exception as exc:
         msg=str(exc)
-        if "402" in msg or "insufficient" in msg.lower(): st.error(f"💳 {provider} rejected the request because the account balance/credits are insufficient. Estimated episode cost: ${cost:.2f}.")
+        if "KLING_BILLING_OR_AUTH" in msg: st.error(f"💳 Kling rejected the request. Check your Kling API key, API permissions and account credits. Estimated episode cost: ${cost:.2f}.")
+        elif "402" in msg or "insufficient" in msg.lower(): st.error(f"💳 {provider} rejected the request because the account balance/credits are insufficient. Estimated episode cost: ${cost:.2f}.")
         else: st.error(f"Video generation failed: {msg}")
         with st.expander("Technical details"): st.exception(exc)
