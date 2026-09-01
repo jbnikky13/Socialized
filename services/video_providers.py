@@ -29,34 +29,16 @@ def estimate(provider: str, seconds: int, resolution: str = "768P") -> float:
 def available(provider: str) -> bool:
     return bool({
         "MiniMax H3": _secret("MINIMAX_API_KEY"),
-        "Kling 2.5 Turbo": _secret("KLING_ACCESS_KEY") and _secret("KLING_SECRET_KEY"),
+        "Kling 2.5 Turbo": _secret("KLING_API_KEY"),
     }.get(provider, ""))
 
 
-def _kling_token() -> str:
-    """Create Kling's short-lived HS256 JWT from Access Key + Secret Key."""
-    access_key = _secret("KLING_ACCESS_KEY")
-    secret_key = _secret("KLING_SECRET_KEY")
-    if not access_key or not secret_key:
-        raise ValueError("KLING_ACCESS_KEY and KLING_SECRET_KEY are required.")
-
-    try:
-        import jwt
-    except ImportError as exc:
-        raise RuntimeError("PyJWT is required for direct Kling API authentication.") from exc
-
-    now = int(time.time())
-    payload = {
-        "iss": access_key,
-        "exp": now + 1800,
-        "nbf": now - 5,
-    }
-    return jwt.encode(payload, secret_key, algorithm="HS256")
-
-
 def _kling_headers() -> dict[str, str]:
+    api_key = _secret("KLING_API_KEY")
+    if not api_key:
+        raise ValueError("KLING_API_KEY is required.")
     return {
-        "Authorization": f"Bearer {_kling_token()}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
@@ -103,7 +85,7 @@ def _kling_create(
     if response.status_code >= 400:
         if response.status_code in (401, 403):
             raise RuntimeError(
-                "KLING_AUTH_ERROR: Kling rejected authentication. Verify KLING_ACCESS_KEY and KLING_SECRET_KEY."
+                "KLING_AUTH_ERROR: Kling rejected the API key. Verify KLING_API_KEY and that API access is enabled."
             )
         if response.status_code == 402:
             raise RuntimeError(
@@ -168,8 +150,6 @@ def create_and_wait(
         return wait_for_task(task)
 
     if provider == "Kling 2.5 Turbo":
-        # Kling's direct API uses JWT auth from Access Key + Secret Key.
-        # The turbo model request uses aspect_ratio rather than a resolution field.
         task_id, endpoint = _kling_create(
             prompt,
             references[0] if references else None,
