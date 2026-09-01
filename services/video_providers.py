@@ -19,14 +19,10 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def estimate(provider: str, seconds: int, resolution: str = "720P") -> float:
-    """Estimate video-generation API cost using current provider rates.
-
-    Kling 2.5 Turbo is currently billed at $0.042/sec for 720P and
-    $0.07/sec for 1080P. The API does not list a 2K tier for this model.
-    """
     rates = {
         "MiniMax H3": 0.13 if resolution == "2K" else 0.08,
-        "Kling 2.5 Turbo": 0.07 if resolution in {"1080P", "2K"} else 0.042,
+        "Kling 2.5 Turbo": 0.07 if resolution == "1080P" else 0.042,
+        "Kling 3.0 Turbo": 0.14 if resolution == "1080P" else 0.112,
     }
     return round(max(0, seconds) * rates.get(provider, 0.08), 2)
 
@@ -35,6 +31,7 @@ def available(provider: str) -> bool:
     return bool({
         "MiniMax H3": _secret("MINIMAX_API_KEY"),
         "Kling 2.5 Turbo": _secret("KLING_API_KEY"),
+        "Kling 3.0 Turbo": _secret("KLING_API_KEY"),
     }.get(provider, ""))
 
 
@@ -57,15 +54,20 @@ def _kling_create(
     image_url: str | None,
     duration: int,
     ratio: str,
+    model: str,
     mode: str = "std",
 ) -> tuple[str, str]:
     if ratio not in {"16:9", "9:16", "1:1"}:
-        raise ValueError("Kling 2.5 Turbo supports 16:9, 9:16, and 1:1 aspect ratios.")
-    if duration not in {5, 10}:
+        raise ValueError("Kling supports 16:9, 9:16, and 1:1 aspect ratios.")
+
+    if model == "kling-v3-0-turbo":
+        if not 3 <= duration <= 15:
+            raise ValueError("Kling 3.0 Turbo supports 3–15 second clips.")
+    elif duration not in {5, 10}:
         raise ValueError("Kling 2.5 Turbo supports 5-second or 10-second clips.")
 
     payload: dict[str, Any] = {
-        "model_name": "kling-v2-5-turbo",
+        "model_name": model,
         "prompt": prompt,
         "duration": str(duration),
         "mode": mode,
@@ -76,6 +78,11 @@ def _kling_create(
         endpoint = "/v1/videos/image2video"
     else:
         endpoint = "/v1/videos/text2video"
+
+    # Kling 3.0 Turbo provides native audio. Audio is intentionally requested
+    # through the model rather than a separate TTS/lip-sync pass.
+    if model == "kling-v3-0-turbo":
+        payload["sound"] = "on"
 
     callback_url = _secret("KLING_CALLBACK_URL")
     if callback_url:
@@ -154,16 +161,22 @@ def create_and_wait(
         task = create_task(prompt, references, duration, resolution, ratio)
         return wait_for_task(task)
 
-    if provider == "Kling 2.5 Turbo":
-        # Kling 2.5 Turbo currently has 720P and 1080P API pricing. The
-        # generation endpoint itself does not expose a separate 2K setting.
-        if resolution not in {"720P", "1080P"}:
-            raise ValueError("Kling 2.5 Turbo supports 720P or 1080P in Socialized.")
+    if provider in {"Kling 2.5 Turbo", "Kling 3.0 Turbo"}:
+        if provider == "Kling 2.5 Turbo":
+            if resolution not in {"720P", "1080P"}:
+                raise ValueError("Kling 2.5 Turbo supports 720P or 1080P in Socialized.")
+            model = "kling-v2-5-turbo"
+        else:
+            if resolution not in {"720P", "1080P"}:
+                raise ValueError("Kling 3.0 Turbo supports 720P or 1080P in Socialized.")
+            model = "kling-v3-0-turbo"
+
         task_id, endpoint = _kling_create(
             prompt,
             references[0] if references else None,
             duration,
             ratio,
+            model=model,
             mode="std",
         )
         return _kling_wait(task_id, endpoint)
