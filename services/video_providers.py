@@ -18,10 +18,15 @@ def _secret(name: str, default: str = "") -> str:
         return default
 
 
-def estimate(provider: str, seconds: int, resolution: str = "768P") -> float:
+def estimate(provider: str, seconds: int, resolution: str = "720P") -> float:
+    """Estimate video-generation API cost using current provider rates.
+
+    Kling 2.5 Turbo is currently billed at $0.042/sec for 720P and
+    $0.07/sec for 1080P. The API does not list a 2K tier for this model.
+    """
     rates = {
         "MiniMax H3": 0.13 if resolution == "2K" else 0.08,
-        "Kling 2.5 Turbo": 0.042 if resolution != "2K" else 0.084,
+        "Kling 2.5 Turbo": 0.07 if resolution in {"1080P", "2K"} else 0.042,
     }
     return round(max(0, seconds) * rates.get(provider, 0.08), 2)
 
@@ -141,7 +146,7 @@ def create_and_wait(
     prompt: str,
     references: list[str],
     duration: int,
-    resolution: str = "768P",
+    resolution: str = "720P",
     ratio: str = "16:9",
 ) -> str:
     if provider == "MiniMax H3":
@@ -150,6 +155,10 @@ def create_and_wait(
         return wait_for_task(task)
 
     if provider == "Kling 2.5 Turbo":
+        # Kling 2.5 Turbo currently has 720P and 1080P API pricing. The
+        # generation endpoint itself does not expose a separate 2K setting.
+        if resolution not in {"720P", "1080P"}:
+            raise ValueError("Kling 2.5 Turbo supports 720P or 1080P in Socialized.")
         task_id, endpoint = _kling_create(
             prompt,
             references[0] if references else None,
