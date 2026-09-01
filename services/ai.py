@@ -12,7 +12,6 @@ def _parse_json(text: str) -> dict:
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s*```$", "", cleaned)
-    # Gemini can occasionally emit a JavaScript-style trailing comma.
     cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
     try:
         return json.loads(cleaned)
@@ -20,31 +19,38 @@ def _parse_json(text: str) -> dict:
         raise RuntimeError(f"Gemini returned invalid JSON: {exc}. Response: {cleaned[:800]}") from exc
 
 
+def _gemini_key() -> str:
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        try:
+            import streamlit as st
+            key = str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+        except Exception:
+            pass
+    return key
+
+
 def _gemini(prompt: str) -> dict:
-    key = os.getenv("GEMINI_API_KEY")
+    key = _gemini_key()
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    try:
+        import streamlit as st
+        model = str(st.secrets.get("GEMINI_MODEL", model))
+    except Exception:
+        pass
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {
-        "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
-    }
+    payload = {"systemInstruction": {"parts": [{"text": SYSTEM}]}, "contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7}}
     r = requests.post(url, headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=payload, timeout=90)
     if not r.ok:
-        try:
-            detail = r.json().get("error", {}).get("message", r.text)
-        except Exception:
-            detail = r.text
+        try: detail = r.json().get("error", {}).get("message", r.text)
+        except Exception: detail = r.text
         raise RuntimeError(f"Gemini API error ({r.status_code}): {detail}")
-    data = r.json()
-    candidates = data.get("candidates", [])
-    if not candidates:
-        raise RuntimeError("Gemini returned no candidates. Check the model, API key, and safety response.")
+    data = r.json(); candidates = data.get("candidates", [])
+    if not candidates: raise RuntimeError("Gemini returned no candidates. Check the model, API key, and safety response.")
     text = "".join(p.get("text", "") for p in candidates[0].get("content", {}).get("parts", [])).strip()
-    if not text:
-        raise RuntimeError("Gemini returned an empty response.")
+    if not text: raise RuntimeError("Gemini returned an empty response.")
     return _parse_json(text)
 
 
