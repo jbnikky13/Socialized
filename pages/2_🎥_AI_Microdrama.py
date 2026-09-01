@@ -26,12 +26,12 @@ with st.sidebar:
     provider = st.selectbox(
         "Provider",
         ["Kling 2.5 Turbo", "MiniMax H3"],
-        help="Kling uses the direct Open Platform API with Access Key + Secret Key JWT authentication.",
+        help="Kling uses the API key issued by the Kling Open Platform.",
     )
     if provider == "Kling 2.5 Turbo":
         options = ["720P", "2K"]
         ratio_options = ["16:9", "9:16", "1:1"]
-        credential_label = "KLING_ACCESS_KEY + KLING_SECRET_KEY"
+        credential_label = "KLING_API_KEY"
     else:
         options = ["768P", "2K"]
         ratio_options = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
@@ -41,12 +41,12 @@ with st.sidebar:
     ratio = st.selectbox("Format", ratio_options)
 
     if available(provider):
-        st.success(f"{provider} credentials detected")
+        st.success(f"{provider} API credentials detected")
     else:
         st.warning(f"Add {credential_label} to Streamlit Secrets")
 
     if provider == "Kling 2.5 Turbo" and st.secrets.get("KLING_WEBHOOK_SECRET", ""):
-        st.caption("✓ Kling webhook secret detected (reserved for callback verification)")
+        st.caption("✓ Kling webhook secret detected")
 
 st.subheader("1. Episode")
 title = st.text_input("Episode title", value=default_title)
@@ -66,19 +66,11 @@ for i in range(int(count)):
         name = st.text_input("Name", ["Maya", "Daniel", "Sarah", "David", "Amara", "Tunde"][i], key=f"vp_name_{i}")
         desc = st.text_area("Appearance / identity", key=f"vp_desc_{i}", height=70)
         url = st.text_input("Reference image URL", key=f"vp_url_{i}", placeholder="https://...")
-        upload = st.file_uploader(
-            "Or upload reference",
-            type=["jpg", "jpeg", "png", "webp"],
-            key=f"vp_upload_{i}",
-        )
+        upload = st.file_uploader("Or upload reference", type=["jpg", "jpeg", "png", "webp"], key=f"vp_upload_{i}")
         ref = image_data_url(upload) if upload else url.strip()
         if upload:
             st.image(upload, width=140)
-        characters.append({
-            "name": name.strip() or f"Character {i + 1}",
-            "description": desc.strip(),
-            "reference": ref,
-        })
+        characters.append({"name": name.strip() or f"Character {i + 1}", "description": desc.strip(), "reference": ref})
 
 st.subheader("3. Scenes")
 scene_count = st.number_input("Scenes", 1, 12, 3, 1)
@@ -86,24 +78,18 @@ scenes = []
 for i in range(int(scene_count)):
     with st.expander(f"Scene {i + 1}", expanded=i == 0):
         setting = st.text_input("Setting", key=f"vp_setting_{i}")
-        selected = st.multiselect(
-            "Characters",
-            [c["name"] for c in characters],
-            default=[characters[0]["name"]],
-            key=f"vp_chars_{i}",
-        )
+        selected = st.multiselect("Characters", [c["name"] for c in characters], default=[characters[0]["name"]], key=f"vp_chars_{i}")
         action = st.text_area("Action + camera", key=f"vp_action_{i}", height=70)
         dialogue = st.text_area("Exact dialogue", key=f"vp_dialogue_{i}", height=70)
         duration = st.slider("Duration", 5, 10, 5, key=f"vp_duration_{i}")
         prompt = (
             "Photorealistic live-action microdrama. Natural human skin, realistic eyes, hair, hands and body movement. "
-            "Cinematic believable lighting. Preserve recurring character identity from reference images. No cartoon, "
-            "illustration, warped faces, extra fingers, text overlays or baked-in subtitles. "
+            "Cinematic believable lighting. Preserve recurring character identity from reference images. No cartoon, illustration, "
+            "warped faces, extra fingers, text overlays or baked-in subtitles. "
             f"SETTING: {setting}. CHARACTERS: {', '.join(selected)}. "
             f"DETAILS: {'; '.join(c['name'] + ': ' + c['description'] for c in characters if c['name'] in selected and c['description'])}. "
             f"ACTION/CAMERA: {action}. Exact spoken dialogue: {dialogue or '[No spoken dialogue]'}. "
-            "Speak the supplied dialogue naturally and synchronize mouth movement and facial expression to the words; "
-            "do not paraphrase or invent dialogue."
+            "Speak the supplied dialogue naturally and synchronize mouth movement and facial expression to the words; do not paraphrase or invent dialogue."
         )
         refs = [c["reference"] for c in characters if c["name"] in selected and c["reference"]]
         scenes.append({"prompt": prompt, "references": refs, "duration": int(duration)})
@@ -120,15 +106,7 @@ missing = [c["name"] for c in characters if not c["reference"]]
 if missing:
     st.warning("Add reference images for: " + ", ".join(missing))
 
-if provider == "Kling 2.5 Turbo" and ratio not in {"16:9", "9:16", "1:1"}:
-    st.error("Kling 2.5 Turbo supports only 16:9, 9:16, and 1:1 formats.")
-
-if st.button(
-    "🚀 Generate Episode",
-    type="primary",
-    use_container_width=True,
-    disabled=(not available(provider) or bool(missing)),
-):
+if st.button("🚀 Generate Episode", type="primary", use_container_width=True, disabled=(not available(provider) or bool(missing))):
     work = Path(tempfile.mkdtemp(prefix="socialized_video_"))
     clips = []
     progress = st.progress(0)
@@ -136,14 +114,7 @@ if st.button(
     try:
         for idx, scene in enumerate(scenes, 1):
             status.info(f"Generating scene {idx}/{len(scenes)} with {provider}...")
-            url = create_and_wait(
-                provider,
-                scene["prompt"],
-                scene["references"],
-                scene["duration"],
-                resolution,
-                ratio,
-            )
+            url = create_and_wait(provider, scene["prompt"], scene["references"], scene["duration"], resolution, ratio)
             clip = work / f"scene_{idx:02d}.mp4"
             download(url, clip)
             clips.append(clip)
@@ -154,13 +125,7 @@ if st.button(
         data = final.read_bytes()
         st.success(f"Episode ready — {seconds} seconds generated with {provider}.")
         st.video(data)
-        st.download_button(
-            "⬇️ Download MP4",
-            data=data,
-            file_name=f"{title or 'microdrama'}.mp4",
-            mime="video/mp4",
-            use_container_width=True,
-        )
+        st.download_button("⬇️ Download MP4", data=data, file_name=f"{title or 'microdrama'}.mp4", mime="video/mp4", use_container_width=True)
         if campaign.get("id"):
             asset = upload_asset(str(final), str(campaign["id"]), asset_type="video")
             st.session_state["video_asset"] = asset
@@ -168,7 +133,7 @@ if st.button(
     except Exception as exc:
         msg = str(exc)
         if "KLING_AUTH_ERROR" in msg:
-            st.error("🔐 Kling authentication failed. Verify KLING_ACCESS_KEY and KLING_SECRET_KEY in Streamlit Secrets.")
+            st.error("🔐 Kling authentication failed. Verify KLING_API_KEY in Streamlit Secrets.")
         elif "KLING_BILLING_ERROR" in msg:
             st.error(f"💳 Kling API credits are insufficient. Estimated episode cost: ${cost:.2f}.")
         elif "402" in msg or "insufficient" in msg.lower():
