@@ -8,6 +8,7 @@ python-dotenv>=1.0,<2
 pydantic>=2.8,<3
 supabase>=2.7,<3
 cryptography>=43,<47
+PyJWT>=2.9,<3
 gTTS>=2.5,<3
 Pillow>=10,<12
 pypdf>=5,<7
