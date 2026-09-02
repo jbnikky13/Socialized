@@ -83,6 +83,7 @@ if visual_source == "📤 Upload my own images":
 else:
     st.subheader("🤖 Pollination AI visuals")
     st.caption("This mode keeps the existing AI-image path. Uploaded-image mode above never calls Pollination for visuals.")
+    st.warning("For uploaded-image generation, switch the visual source above. Pollination is not involved in that path.")
 
 st.divider()
 st.subheader("🎞️ Scene builder")
@@ -91,18 +92,8 @@ scene_count = st.number_input("Number of scenes", 1, 12, min(5, max(1, len(uploa
 scenes = []
 for i in range(int(scene_count)):
     with st.expander(f"Scene {i + 1}", expanded=i == 0):
-        action = st.text_area(
-            "Action / camera direction",
-            placeholder="A woman enters the apartment, freezes, then slowly turns toward the open bedroom door.",
-            key=f"pipeline_action_{i}",
-            height=80,
-        )
-        dialogue = st.text_area(
-            "Exact dialogue (optional)",
-            placeholder="Don't move. I know what you did.",
-            key=f"pipeline_dialogue_{i}",
-            height=70,
-        )
+        action = st.text_area("Action / camera direction", key=f"pipeline_action_{i}", height=80, placeholder="A woman enters the apartment, freezes, then slowly turns toward the open bedroom door.")
+        dialogue = st.text_area("Exact dialogue (optional)", key=f"pipeline_dialogue_{i}", height=70, placeholder="Don't move. I know what you did.")
         setting = st.text_input("Setting / continuity", key=f"pipeline_setting_{i}", placeholder="Modern Lagos apartment at night")
 
         ref_url = None
@@ -155,7 +146,8 @@ if st.button("🎬 Generate Microdrama", type="primary", use_container_width=Tru
             stitch(clips, final)
             asset = media.upload_asset(str(final), str(campaign_id), asset_type="microdrama_video")
             st.session_state["microdrama_pipeline_video"] = asset
-            status.success("Microdrama generated, stitched and stored in Supabase.")
+            st.session_state["video_asset"] = asset
+            status.success("Microdrama generated, stitched and stored in Supabase. It is ready in the YouTube publishing flow.")
         except Exception as exc:
             st.error(f"Microdrama generation failed: {exc}")
 
@@ -164,4 +156,4 @@ if video_asset and video_asset.get("public_url"):
     st.divider()
     st.subheader("🎥 Finished Microdrama")
     st.video(video_asset["public_url"])
-    st.success("The finished MP4 is stored as a campaign media asset and can be used by the Socialized publishing flow.")
+    st.success("The finished MP4 is stored as a campaign media asset and is also loaded into Socialized's publishing video slot.")
