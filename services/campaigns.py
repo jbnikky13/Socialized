@@ -12,11 +12,54 @@ def save_campaign(name: str, niche: str, pack: dict, user_id: str | None = None)
     campaign_id = campaign["id"]
     title = pack.get("title") or pack.get("idea") or name
     body = pack.get("script") or pack.get("description") or ""
-    client().table("content_items").insert({"campaign_id": campaign_id, "platform": "youtube", "content_type": "video", "title": title, "body": body, "status": "draft"}).execute()
+
+    client().table("content_items").insert(
+        {
+            "campaign_id": campaign_id,
+            "platform": "youtube",
+            "content_type": "video",
+            "title": title,
+            "body": body,
+            "status": "draft",
+        }
+    ).execute()
+
+    description = (pack.get("description") or "").strip()
+    if description:
+        client().table("content_items").insert(
+            {
+                "campaign_id": campaign_id,
+                "platform": "youtube",
+                "content_type": "description",
+                "title": title,
+                "body": description,
+                "status": "draft",
+            }
+        ).execute()
+
     for post in pack.get("x_posts", []):
-        client().table("content_items").insert({"campaign_id": campaign_id, "platform": "x", "content_type": "post", "title": title, "body": post, "status": "draft"}).execute()
+        client().table("content_items").insert(
+            {
+                "campaign_id": campaign_id,
+                "platform": "x",
+                "content_type": "post",
+                "title": title,
+                "body": post,
+                "status": "draft",
+            }
+        ).execute()
+
     for short in pack.get("shorts", []):
-        client().table("content_items").insert({"campaign_id": campaign_id, "platform": "youtube", "content_type": "short", "title": title, "body": short, "status": "draft"}).execute()
+        client().table("content_items").insert(
+            {
+                "campaign_id": campaign_id,
+                "platform": "youtube",
+                "content_type": "short",
+                "title": title,
+                "body": short,
+                "status": "draft",
+            }
+        ).execute()
     return campaign
 
 
