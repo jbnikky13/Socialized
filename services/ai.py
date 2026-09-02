@@ -1,5 +1,4 @@
 from __future__ import annotations
-import base64
 import json
 import os
 import re
@@ -110,52 +109,50 @@ Do not add logos, watermarks, captions, UI, or embedded text. Do not reference c
     return [str(p).strip() for p in prompts[:count] if str(p).strip()]
 
 
-def generate_campaign_image(prompt: str, aspect_ratio: str = "16:9") -> bytes:
-    """Generate one campaign image with Gemini's native image model."""
-    key = _gemini_key()
+def _pollinations_key() -> str:
+    key = os.getenv("POLLINATIONS_API_KEY", "").strip()
     if not key:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
+        try:
+            import streamlit as st
+            key = str(st.secrets.get("POLLINATIONS_API_KEY", "")).strip()
+        except Exception:
+            pass
+    return key
 
-    # Stable GA Nano Banana 2 model; override with GEMINI_IMAGE_MODEL if needed.
-    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
+
+def generate_campaign_image(prompt: str, aspect_ratio: str = "16:9") -> bytes:
+    """Generate a campaign image through Pollinations and return the image bytes."""
+    key = _pollinations_key()
+    if not key:
+        raise RuntimeError("POLLINATIONS_API_KEY is not configured. Add your Pollinations API key to Streamlit Secrets.")
+
+    model = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip() or "flux"
     try:
         import streamlit as st
-        model = str(st.secrets.get("GEMINI_IMAGE_MODEL", model)).strip()
+        model = str(st.secrets.get("POLLINATIONS_IMAGE_MODEL", model)).strip() or "flux"
     except Exception:
         pass
 
-    payload = {
-        "model": model,
-        "input": prompt,
-        "response_format": {
-            "type": "image",
-            "mime_type": "image/png",
-            "aspect_ratio": aspect_ratio,
-        },
-    }
-    response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/interactions",
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-        json=payload,
-        timeout=180,
-    )
+    ratio_note = {
+        "16:9": "wide 16:9 landscape composition",
+        "9:16": "vertical 9:16 portrait composition",
+        "1:1": "square 1:1 composition",
+    }.get(aspect_ratio, f"{aspect_ratio} composition")
+    final_prompt = f"{prompt}. Compose the image as a {ratio_note}."
+
+    try:
+        response = requests.get(
+            "https://gen.pollinations.ai/image/" + requests.utils.quote(final_prompt, safe=""),
+            params={"model": model},
+            headers={"Authorization": f"Bearer {key}", "Accept": "image/*"},
+            timeout=180,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Pollinations image request failed: {exc}") from exc
+
     if not response.ok:
-        try:
-            detail = response.json().get("error", {}).get("message", response.text)
-        except Exception:
-            detail = response.text
-        raise RuntimeError(f"Gemini image API error ({response.status_code}): {detail}")
-
-    data = response.json()
-    output_image = data.get("output_image") or {}
-    if output_image.get("data"):
-        return base64.b64decode(output_image["data"])
-
-    for step in data.get("steps", []):
-        if step.get("type") != "model_output":
-            continue
-        for block in step.get("content", []):
-            if block.get("type") == "image" and block.get("data"):
-                return base64.b64decode(block["data"])
-
-    raise RuntimeError("Gemini image generation returned no image data.")
+        detail = response.text[:500]
+        raise RuntimeError(f"Pollinations image API error ({response.status_code}): {detail}")
+    if not response.content or not response.headers.get("content-type", "").lower().startswith("image/"):
+        raise RuntimeError("Pollinations returned an unexpected response instead of an image.")
+    return response.content
