@@ -5,13 +5,15 @@ from pathlib import Path
 
 import streamlit as st
 
+from services.ai import generate_package, generate_campaign_visual_prompts, generate_campaign_image
+from services.campaigns import save_campaign
 from services.video_providers import available, create_and_wait, estimate
 from services.minimax_h3 import image_data_url, stitch, download
 from services.media import upload_asset
 
 st.set_page_config(page_title="AI Microdrama | Socialized", page_icon="🎥", layout="wide")
 st.title("🎥 AI Photoreal Microdrama")
-st.caption("Campaign/story → scenes → Kling/AI video → finished video → Supabase → YouTube")
+st.caption("Campaign → story → campaign images → scenes → Kling/AI video → finished video → Supabase → YouTube")
 
 campaign = st.session_state.get("last_campaign") or {}
 reused = st.session_state.get("reused_content", [])
@@ -20,6 +22,181 @@ default_script = campaign.get("script", "") or next(
     "",
 )
 default_title = campaign.get("title") or campaign.get("name") or "AI Microdrama"
+
+st.subheader("0. Campaign Studio")
+st.caption("Start with an idea. Socialized can write the campaign and create visual assets that match the story.")
+
+with st.container(border=True):
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        campaign_topic = st.text_input(
+            "Campaign idea / topic",
+            value=st.session_state.get("micro_campaign_topic", ""),
+            placeholder="e.g. A woman discovers a secret that changes her family forever",
+            key="micro_campaign_topic_input",
+        )
+    with c2:
+        campaign_niche = st.text_input(
+            "Niche",
+            value=st.session_state.get("micro_campaign_niche", "Drama / Storytelling"),
+            key="micro_campaign_niche_input",
+        )
+
+    campaign_context = st.text_area(
+        "Optional campaign direction / notes",
+        value=st.session_state.get("micro_campaign_context", ""),
+        height=80,
+        placeholder="Audience, location, theme, brand message, characters, or anything the story should include.",
+        key="micro_campaign_context_input",
+    )
+
+    if st.button("✨ Generate Campaign", type="primary", use_container_width=True, key="generate_micro_campaign"):
+        if not campaign_topic.strip():
+            st.warning("Enter a campaign idea first.")
+        else:
+            try:
+                with st.spinner("Writing campaign story, hook, titles and social content..."):
+                    st.session_state["micro_campaign_package"] = generate_package(
+                        campaign_topic.strip(),
+                        campaign_niche.strip() or "Drama / Storytelling",
+                        "story",
+                        campaign_context.strip(),
+                    )
+                st.session_state.pop("micro_campaign_images", None)
+                st.success("Campaign generated. Review it below, then save it and create the visuals.")
+            except Exception as exc:
+                st.error(f"Campaign generation failed: {exc}")
+
+package = st.session_state.get("micro_campaign_package")
+if package:
+    with st.container(border=True):
+        st.markdown("### Generated campaign")
+        title_options = package.get("title_options", [])
+        campaign_title = st.selectbox(
+            "Campaign title",
+            title_options if title_options else [package.get("idea", campaign_topic or "AI Microdrama")],
+            key="micro_campaign_title",
+        )
+        campaign_hook = st.text_area("Hook", package.get("hook", ""), height=80, key="micro_campaign_hook")
+        campaign_script = st.text_area(
+            "Campaign story / script",
+            package.get("script", ""),
+            height=260,
+            key="micro_campaign_script",
+        )
+        campaign_description = st.text_area(
+            "YouTube description",
+            package.get("description", ""),
+            height=120,
+            key="micro_campaign_description",
+        )
+
+        if st.button("💾 Save Campaign to Supabase", type="primary", use_container_width=True, key="save_micro_campaign"):
+            try:
+                pack = dict(package)
+                pack.update(
+                    {
+                        "title": campaign_title,
+                        "script": campaign_script.strip(),
+                        "description": campaign_description.strip(),
+                        "tags": package.get("tags", []),
+                        "thumbnail_text": package.get("thumbnail_text", ""),
+                        "x_posts": package.get("x_posts", []),
+                        "shorts": package.get("shorts", []),
+                    }
+                )
+                if not pack["script"]:
+                    raise ValueError("The campaign story/script is empty.")
+                saved = save_campaign(campaign_title, campaign_niche.strip() or "Drama / Storytelling", pack)
+                saved.update(
+                    {
+                        "title": campaign_title,
+                        "script": pack["script"],
+                        "description": pack["description"],
+                        "tags": pack["tags"],
+                    }
+                )
+                st.session_state["last_campaign"] = saved
+                st.session_state["reused_content"] = [
+                    {"platform": "youtube", "content_type": "video", "title": campaign_title, "body": pack["script"]},
+                    {"platform": "youtube", "content_type": "description", "title": campaign_title, "body": pack["description"]},
+                ] + [
+                    {"platform": "x", "content_type": "post", "title": campaign_title, "body": p}
+                    for p in pack.get("x_posts", [])
+                ]
+                st.session_state["micro_campaign_saved_id"] = saved["id"]
+                st.session_state["micro_campaign_topic"] = campaign_topic.strip()
+                st.session_state["micro_campaign_niche"] = campaign_niche.strip()
+                st.success(f"Campaign saved: {saved['id']}")
+                campaign = saved
+                default_script = saved["script"]
+                default_title = saved["title"]
+            except Exception as exc:
+                st.error(f"Could not save campaign: {exc}")
+
+saved_campaign = st.session_state.get("last_campaign") or {}
+if package:
+    st.markdown("### 🖼️ Campaign Images")
+    st.caption("Generate original visuals directly from the campaign story. These are stored under the campaign in Supabase Storage.")
+
+    v1, v2, v3 = st.columns(3)
+    with v1:
+        image_count = st.slider("Images", 1, 4, 3, key="micro_image_count")
+    with v2:
+        image_style = st.selectbox(
+            "Visual style",
+            ["photorealistic cinematic", "premium advertising", "dark cinematic drama", "warm emotional drama"],
+            key="micro_image_style",
+        )
+    with v3:
+        image_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16", "1:1"], key="micro_image_ratio")
+
+    if not saved_campaign.get("id"):
+        st.info("Save the campaign first. Images will then be attached to that campaign and available for the video workflow.")
+    else:
+        if st.button("🎨 Generate Campaign Images", type="primary", use_container_width=True, key="generate_micro_images"):
+            try:
+                with st.spinner("Creating campaign-specific visual prompts..."):
+                    prompts = generate_campaign_visual_prompts(
+                        saved_campaign.get("title", default_title),
+                        campaign_script if package else saved_campaign.get("script", default_script),
+                        saved_campaign.get("niche", campaign_niche),
+                        image_count,
+                        image_style,
+                    )
+
+                work = Path(tempfile.mkdtemp(prefix="socialized_campaign_images_"))
+                assets = []
+                progress = st.progress(0)
+                status = st.empty()
+
+                for idx, prompt in enumerate(prompts, 1):
+                    status.info(f"Generating campaign image {idx}/{len(prompts)}...")
+                    image_bytes = generate_campaign_image(prompt, image_ratio)
+                    path = work / f"campaign_image_{idx:02d}.png"
+                    path.write_bytes(image_bytes)
+                    asset = upload_asset(str(path), str(saved_campaign["id"]), asset_type="campaign_image")
+                    asset["prompt"] = prompt
+                    assets.append(asset)
+                    progress.progress(int(idx / len(prompts) * 100))
+
+                st.session_state["micro_campaign_images"] = assets
+                status.success(f"{len(assets)} campaign images generated and stored.")
+            except Exception as exc:
+                st.error(f"Campaign image generation failed: {exc}")
+
+images = st.session_state.get("micro_campaign_images", [])
+if images:
+    cols = st.columns(min(4, len(images)))
+    for idx, asset in enumerate(images):
+        with cols[idx % len(cols)]:
+            if asset.get("public_url"):
+                st.image(asset["public_url"], use_container_width=True)
+            st.caption(f"Campaign visual {idx + 1}")
+            with st.expander("Image prompt"):
+                st.write(asset.get("prompt", ""))
+
+st.divider()
 
 with st.sidebar:
     st.subheader("⚙️ Video engine")
@@ -62,13 +239,22 @@ with st.sidebar:
     if provider.startswith("Kling") and provider != "Kling Studio (Manual)" and st.secrets.get("KLING_WEBHOOK_SECRET", ""):
         st.caption("✓ Kling webhook secret detected")
 
+campaign = st.session_state.get("last_campaign") or campaign or {}
+reused = st.session_state.get("reused_content", [])
+default_script = campaign.get("script", "") or next(
+    (x.get("body", "") for x in reused if x.get("platform") == "youtube" and x.get("content_type") == "video"),
+    default_script,
+)
+default_title = campaign.get("title") or campaign.get("name") or default_title
+
 st.subheader("1. Episode")
-title = st.text_input("Episode title", value=default_title)
+title = st.text_input("Episode title", value=default_title, key="micro_episode_title")
 story = st.text_area(
     "Campaign script / story",
     value=default_script,
     height=160,
     placeholder="Use the saved campaign script or paste a story.",
+    key="micro_episode_story",
 )
 
 st.subheader("2. Recurring characters")
