@@ -116,7 +116,8 @@ def generate_campaign_image(prompt: str, aspect_ratio: str = "16:9") -> bytes:
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
-    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip()
+    # Stable GA Nano Banana 2 model; override with GEMINI_IMAGE_MODEL if needed.
+    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image").strip()
     try:
         import streamlit as st
         model = str(st.secrets.get("GEMINI_IMAGE_MODEL", model)).strip()
