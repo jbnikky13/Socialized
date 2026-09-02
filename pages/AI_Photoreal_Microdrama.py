@@ -13,8 +13,8 @@ st.set_page_config(page_title="AI Photoreal Microdrama", page_icon="🎬", layou
 st.title("🎬 AI Photoreal Microdrama")
 st.caption("Create short-form microdrama scenes with AI visuals or your own uploaded images.")
 
-# The important part of this page is the visual-source switch:
-# Upload Images completely bypasses Pollination AI for the visual asset.
+# Upload Images is a real alternative visual provider: when selected,
+# the Pollination image path is never requested.
 visual_source = st.radio(
     "Visual source",
     ["🤖 Pollination AI", "📤 Upload images"],
@@ -47,9 +47,9 @@ if visual_source == "📤 Upload images":
         elif st.button("☁️ Save images to campaign", type="primary", use_container_width=True):
             saved = []
             try:
-                for uploaded in uploads:
+                for index, uploaded in enumerate(uploads):
                     suffix = Path(uploaded.name).suffix.lower() or ".png"
-                    temp = Path(tempfile.gettempdir()) / f"socialized_microdrama_{campaign_id}_{i}{suffix}"
+                    temp = Path(tempfile.gettempdir()) / f"socialized_microdrama_{campaign_id}_{index}{suffix}"
                     temp.write_bytes(uploaded.getbuffer())
                     try:
                         saved.append(media.upload_asset(str(temp), str(campaign_id), asset_type="microdrama_image"))
@@ -64,7 +64,8 @@ if visual_source == "📤 Upload images":
     if saved:
         st.subheader("Saved scene images")
         for index, asset in enumerate(saved, 1):
-            st.write(f"Scene {index}: {asset.get('public_url', '')}")
+            url = asset.get("public_url", "")
+            st.image(url, caption=f"Uploaded image {index}", width=220)
 
 else:
     st.subheader("🤖 Pollination AI visuals")
@@ -86,18 +87,20 @@ else:
 
     if st.session_state.get("microdrama_pollination_url"):
         st.image(st.session_state["microdrama_pollination_url"], caption="Pollination AI scene", use_container_width=True)
-        st.caption(st.session_state["microdrama_pollination_url"])
 
 st.divider()
 st.subheader("🎞️ Microdrama scene plan")
 scene_count = st.number_input("Number of scenes", min_value=1, max_value=20, value=5, step=1)
 
+saved_images = st.session_state.get("microdrama_images", [])
+visual_options = ["Use uploaded image"] + [f"Uploaded image {i + 1}" for i in range(len(saved_images))]
+
 for scene in range(1, int(scene_count) + 1):
     with st.expander(f"Scene {scene}", expanded=scene == 1):
         st.text_area("Action / dialogue", key=f"micro_scene_{scene}", height=100, placeholder="Describe what happens in this scene...")
         if visual_source == "📤 Upload images":
-            st.selectbox("Visual", ["Use uploaded image"] + [f"Uploaded image {i + 1}" for i in range(len(st.session_state.get("microdrama_images", [])))], key=f"micro_visual_{scene}")
+            st.selectbox("Visual", visual_options, key=f"micro_visual_{scene}")
         else:
             st.caption("Visual source: Pollination AI")
 
-st.caption("Uploaded-image mode is designed as a provider-independent visual path: your image is stored as a campaign asset and can be passed to the downstream image-to-video renderer without requesting a new image from Pollination AI.")
+st.caption("Uploaded-image mode is provider-independent: your image is stored as a campaign asset and can be passed to the downstream image-to-video renderer without requesting a new image from Pollination AI.")
