@@ -1,106 +1,167 @@
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
-from urllib.parse import quote
 
 import streamlit as st
 
 from services import media
+from services.video_providers import available, create_and_wait, estimate
+from services.minimax_h3 import download, stitch
 
 st.set_page_config(page_title="AI Photoreal Microdrama", page_icon="🎬", layout="wide")
 st.title("🎬 AI Photoreal Microdrama")
-st.caption("Create short-form microdrama scenes with AI visuals or your own uploaded images.")
+st.caption("Generate a microdrama from AI visuals or uploaded images, then turn each image into a moving scene.")
 
-# Upload Images is a real alternative visual provider: when selected,
-# the Pollination image path is never requested.
+campaign = st.session_state.get("last_campaign") or {}
+campaign_id = campaign.get("id")
+
 visual_source = st.radio(
     "Visual source",
-    ["🤖 Pollination AI", "📤 Upload images"],
+    ["🤖 Generate visuals with Pollination AI", "📤 Upload my own images"],
     horizontal=True,
-    help="Choose Pollination AI for generated scene images, or upload your own images and use them instead.",
 )
 
-campaign_id = st.session_state.get("last_campaign", {}).get("id")
+provider = st.selectbox("Video engine", ["Kling 3.0 Turbo", "Kling 2.5 Turbo", "MiniMax H3"])
+if provider == "Kling 3.0 Turbo":
+    resolution = st.selectbox("Resolution", ["720P", "1080P"])
+    ratio = st.selectbox("Format", ["9:16", "16:9", "1:1"])
+    duration = st.slider("Seconds per scene", 3, 15, 5)
+elif provider == "Kling 2.5 Turbo":
+    resolution = st.selectbox("Resolution", ["720P", "1080P"])
+    ratio = st.selectbox("Format", ["9:16", "16:9", "1:1"])
+    duration = st.select_slider("Seconds per scene", [5, 10], value=5)
+else:
+    resolution = st.selectbox("Resolution", ["768P", "2K"])
+    ratio = st.selectbox("Format", ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"])
+    duration = st.slider("Seconds per scene", 4, 15, 5)
 
-if visual_source == "📤 Upload images":
-    st.subheader("📤 Upload your microdrama images")
-    st.info("Uploaded images are used as the scene visuals. Pollination AI is not called when this option is selected.")
+if not available(provider):
+    st.warning(f"Add the {('KLING_API_KEY' if provider.startswith('Kling') else 'MINIMAX_API_KEY')} secret before generating video.")
 
+uploaded_assets = []
+if visual_source == "📤 Upload my own images":
+    st.subheader("📤 Your visual assets")
+    st.info("These images replace the AI image-generation step. They are uploaded to Supabase and passed directly to the selected image-to-video provider.")
     uploads = st.file_uploader(
-        "Character, location, or scene reference images",
+        "Upload scene/character images",
         type=["png", "jpg", "jpeg", "webp"],
         accept_multiple_files=True,
-        key="microdrama_images",
-        help="Upload one or several images. You can assign them to scenes below.",
+        key="microdrama_pipeline_uploads",
     )
-
     if uploads:
         cols = st.columns(min(4, len(uploads)))
-        for i, uploaded in enumerate(uploads):
+        for i, f in enumerate(uploads):
             with cols[i % len(cols)]:
-                st.image(uploaded, caption=uploaded.name, use_container_width=True)
+                st.image(f, caption=f.name, use_container_width=True)
 
         if not campaign_id:
-            st.warning("Select or create a campaign first if you want the images permanently stored in Supabase.")
-        elif st.button("☁️ Save images to campaign", type="primary", use_container_width=True):
-            saved = []
+            st.error("Create or select a campaign first. Uploaded images need a campaign ID so they can be stored and reused.")
+        elif st.button("☁️ Save uploaded images", type="primary", use_container_width=True):
             try:
-                for index, uploaded in enumerate(uploads):
-                    suffix = Path(uploaded.name).suffix.lower() or ".png"
-                    temp = Path(tempfile.gettempdir()) / f"socialized_microdrama_{campaign_id}_{index}{suffix}"
-                    temp.write_bytes(uploaded.getbuffer())
+                saved = []
+                for i, f in enumerate(uploads):
+                    suffix = Path(f.name).suffix.lower() or ".png"
+                    temp = Path(tempfile.gettempdir()) / f"socialized_microdrama_{campaign_id}_{i}{suffix}"
+                    temp.write_bytes(f.getbuffer())
                     try:
                         saved.append(media.upload_asset(str(temp), str(campaign_id), asset_type="microdrama_image"))
                     finally:
                         temp.unlink(missing_ok=True)
-                st.session_state["microdrama_images"] = saved
-                st.success(f"Saved {len(saved)} image(s) to Supabase Storage.")
+                st.session_state["microdrama_pipeline_images"] = saved
+                st.success(f"Saved {len(saved)} image(s). They are now available to the video pipeline.")
             except Exception as exc:
                 st.error(str(exc))
 
-    saved = st.session_state.get("microdrama_images", [])
-    if saved:
-        st.subheader("Saved scene images")
-        for index, asset in enumerate(saved, 1):
-            url = asset.get("public_url", "")
-            st.image(url, caption=f"Uploaded image {index}", width=220)
-
+    uploaded_assets = st.session_state.get("microdrama_pipeline_images", [])
+    if uploaded_assets:
+        st.markdown("### Saved images")
+        cols = st.columns(min(4, len(uploaded_assets)))
+        for i, asset in enumerate(uploaded_assets):
+            with cols[i % len(cols)]:
+                st.image(asset.get("public_url", ""), caption=f"Image {i + 1}", use_container_width=True)
 else:
     st.subheader("🤖 Pollination AI visuals")
-    st.caption("Use AI-generated stills when you do not have your own visual assets.")
-    prompt = st.text_area(
-        "Scene visual prompt",
-        placeholder="Photorealistic cinematic close-up of two people arguing in a Lagos apartment at night, natural skin texture, dramatic practical lighting, 9:16 vertical composition",
-        height=120,
-    )
-    if st.button("Generate scene image", type="primary"):
-        if not prompt.strip():
-            st.warning("Enter a visual prompt first.")
-        else:
-            encoded = quote(prompt.strip())
-            model = os.getenv("POLLINATIONS_MODEL", "flux")
-            url = f"https://image.pollinations.ai/prompt/{encoded}?model={quote(model)}&width=768&height=1365&nologo=true"
-            st.session_state["microdrama_pollination_url"] = url
-            st.success("Pollination AI scene image prepared.")
-
-    if st.session_state.get("microdrama_pollination_url"):
-        st.image(st.session_state["microdrama_pollination_url"], caption="Pollination AI scene", use_container_width=True)
+    st.caption("This mode keeps the existing AI-image path. Uploaded-image mode above never calls Pollination for visuals.")
 
 st.divider()
-st.subheader("🎞️ Microdrama scene plan")
-scene_count = st.number_input("Number of scenes", min_value=1, max_value=20, value=5, step=1)
+st.subheader("🎞️ Scene builder")
+scene_count = st.number_input("Number of scenes", 1, 12, min(5, max(1, len(uploaded_assets) or 5)), 1)
 
-saved_images = st.session_state.get("microdrama_images", [])
-visual_options = ["Use uploaded image"] + [f"Uploaded image {i + 1}" for i in range(len(saved_images))]
+scenes = []
+for i in range(int(scene_count)):
+    with st.expander(f"Scene {i + 1}", expanded=i == 0):
+        action = st.text_area(
+            "Action / camera direction",
+            placeholder="A woman enters the apartment, freezes, then slowly turns toward the open bedroom door.",
+            key=f"pipeline_action_{i}",
+            height=80,
+        )
+        dialogue = st.text_area(
+            "Exact dialogue (optional)",
+            placeholder="Don't move. I know what you did.",
+            key=f"pipeline_dialogue_{i}",
+            height=70,
+        )
+        setting = st.text_input("Setting / continuity", key=f"pipeline_setting_{i}", placeholder="Modern Lagos apartment at night")
 
-for scene in range(1, int(scene_count) + 1):
-    with st.expander(f"Scene {scene}", expanded=scene == 1):
-        st.text_area("Action / dialogue", key=f"micro_scene_{scene}", height=100, placeholder="Describe what happens in this scene...")
-        if visual_source == "📤 Upload images":
-            st.selectbox("Visual", visual_options, key=f"micro_visual_{scene}")
-        else:
-            st.caption("Visual source: Pollination AI")
+        ref_url = None
+        if uploaded_assets:
+            labels = [f"Uploaded image {j + 1}" for j in range(len(uploaded_assets))]
+            selected = st.selectbox("Starting image", labels, key=f"pipeline_image_{i}")
+            ref_url = uploaded_assets[int(selected.split()[-1]) - 1].get("public_url")
+            if ref_url:
+                st.image(ref_url, width=180)
 
-st.caption("Uploaded-image mode is provider-independent: your image is stored as a campaign asset and can be passed to the downstream image-to-video renderer without requesting a new image from Pollination AI.")
+        prompt = (
+            "Photorealistic live-action microdrama. Preserve the subject's identity, clothing, environment and visual continuity "
+            "from the starting image. Natural skin texture, realistic eyes, hair, hands and physics. Cinematic but believable lighting. "
+            "No animation, illustration, warped faces, extra fingers, text overlays or watermarks. "
+            f"SETTING: {setting}. ACTION/CAMERA: {action}. EXACT DIALOGUE: {dialogue or '[No spoken dialogue]'}. "
+            "Make the movement subtle and cinematic, with realistic facial performance and camera motion."
+        )
+        scenes.append({"prompt": prompt, "reference": ref_url})
+
+st.divider()
+if scenes:
+    total_seconds = int(duration) * len(scenes)
+    st.metric("Estimated video duration", f"{total_seconds}s")
+    st.caption(f"Estimated API generation cost: ${estimate(provider, total_seconds, resolution):.2f} based on the rates configured in Socialized.")
+
+if st.button("🎬 Generate Microdrama", type="primary", use_container_width=True):
+    if not campaign_id:
+        st.error("Create or select a campaign first so the finished video can be stored in Supabase.")
+    elif visual_source == "📤 Upload my own images" and not uploaded_assets:
+        st.error("Upload and save at least one image first.")
+    elif not available(provider):
+        st.error("Configure the selected video provider API key first.")
+    else:
+        try:
+            work = Path(tempfile.mkdtemp(prefix="socialized_microdrama_pipeline_"))
+            clips = []
+            progress = st.progress(0)
+            status = st.empty()
+
+            for i, scene in enumerate(scenes, 1):
+                status.info(f"Generating scene {i}/{len(scenes)} with {provider}...")
+                refs = [scene["reference"]] if scene.get("reference") else []
+                url = create_and_wait(provider, scene["prompt"], refs, int(duration), resolution, ratio)
+                clip = work / f"scene_{i:02d}.mp4"
+                download(url, clip)
+                clips.append(clip)
+                progress.progress(int(i / len(scenes) * 100))
+
+            final = work / "microdrama_episode.mp4"
+            stitch(clips, final)
+            asset = media.upload_asset(str(final), str(campaign_id), asset_type="microdrama_video")
+            st.session_state["microdrama_pipeline_video"] = asset
+            status.success("Microdrama generated, stitched and stored in Supabase.")
+        except Exception as exc:
+            st.error(f"Microdrama generation failed: {exc}")
+
+video_asset = st.session_state.get("microdrama_pipeline_video")
+if video_asset and video_asset.get("public_url"):
+    st.divider()
+    st.subheader("🎥 Finished Microdrama")
+    st.video(video_asset["public_url"])
+    st.success("The finished MP4 is stored as a campaign media asset and can be used by the Socialized publishing flow.")
