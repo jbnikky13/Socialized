@@ -6,11 +6,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 
-APP = FastAPI(title="Socialized GPU Worker", version="1.0.0")
+APP = FastAPI(title="Socialized GPU Worker", version="1.1.0")
 JOBS: dict[str, dict[str, Any]] = {}
 LOCK = threading.Lock()
 SESSION = None
@@ -18,6 +19,7 @@ SESSION = None
 
 class JobRequest(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
+    reference_urls: list[str] = Field(default_factory=list)
 
 
 def _auth(expected: str | None) -> None:
@@ -41,11 +43,44 @@ def _session():
     return SESSION
 
 
-def _run(job_id: str, settings: dict[str, Any]) -> None:
+def _download_references(job_id: str, urls: list[str]) -> list[str]:
+    paths: list[str] = []
+    if not urls:
+        return paths
+    base = Path(os.getenv("MICRODRAMA_INPUT_DIR", "/tmp/socialized-microdrama")) / job_id
+    base.mkdir(parents=True, exist_ok=True)
+    for index, url in enumerate(urls[:8], 1):
+        response = requests.get(url, timeout=120)
+        response.raise_for_status()
+        suffix = ".jpg"
+        content_type = response.headers.get("content-type", "").lower()
+        if "png" in content_type:
+            suffix = ".png"
+        elif "webp" in content_type:
+            suffix = ".webp"
+        target = base / f"reference_{index}{suffix}"
+        target.write_bytes(response.content)
+        paths.append(str(target))
+    return paths
+
+
+def _prepare_settings(job_id: str, settings: dict[str, Any], reference_urls: list[str]) -> dict[str, Any]:
+    prepared = dict(settings)
+    refs = _download_references(job_id, reference_urls)
+    if refs and not prepared.get("image_start") and not prepared.get("image_refs"):
+        prepared["image_prompt_type"] = prepared.get("image_prompt_type") or "S"
+        prepared["image_start"] = refs[0]
+    elif refs and not prepared.get("image_refs"):
+        prepared["image_refs"] = refs
+    return prepared
+
+
+def _run(job_id: str, settings: dict[str, Any], reference_urls: list[str]) -> None:
     try:
         with LOCK:
             JOBS[job_id].update(status="running", progress=0, message="GPU worker started")
-        job = _session().submit_task(settings)
+        prepared = _prepare_settings(job_id, settings, reference_urls)
+        job = _session().submit_task(prepared)
         with LOCK:
             JOBS[job_id]["message"] = "Generation queued on WanGP"
 
@@ -72,6 +107,13 @@ def health() -> dict[str, Any]:
     return {"ok": True, "backend": "WanGP", "gpu_worker": True}
 
 
+@APP.get("/models")
+def models(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _auth(authorization)
+    metadata = _session().list_model_metadata(main_output="video", limit=100)
+    return {"models": metadata}
+
+
 @APP.post("/jobs")
 def create_job(payload: JobRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(authorization)
@@ -90,7 +132,7 @@ def create_job(payload: JobRequest, authorization: str | None = Header(default=N
             "message": "Queued",
             "generated_files": [],
         }
-    threading.Thread(target=_run, args=(job_id, settings), daemon=True).start()
+    threading.Thread(target=_run, args=(job_id, settings, payload.reference_urls), daemon=True).start()
     return JOBS[job_id]
 
 
@@ -107,8 +149,6 @@ def get_job(job_id: str, authorization: str | None = Header(default=None)) -> di
 @APP.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _auth(authorization)
-    # The first MVP keeps cancellation conservative: queued/running jobs are
-    # marked as cancellation requested. A future adapter can call job.cancel().
     with LOCK:
         job = JOBS.get(job_id)
         if not job:
