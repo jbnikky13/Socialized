@@ -8,10 +8,11 @@ from typing import Any
 
 import requests
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 
-APP = FastAPI(title="Socialized GPU Worker", version="1.1.0")
+APP = FastAPI(title="Socialized GPU Worker", version="1.2.0")
 JOBS: dict[str, dict[str, Any]] = {}
 LOCK = threading.Lock()
 SESSION = None
@@ -144,6 +145,22 @@ def get_job(job_id: str, authorization: str | None = Header(default=None)) -> di
         if not job:
             raise HTTPException(status_code=404, detail="Job not found.")
         return dict(job)
+
+
+@APP.get("/jobs/{job_id}/download")
+def download_job(job_id: str, authorization: str | None = Header(default=None)) -> FileResponse:
+    _auth(authorization)
+    with LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found.")
+        if job.get("status") != "completed" or not job.get("generated_files"):
+            raise HTTPException(status_code=409, detail="Generation is not complete.")
+        path = Path(job["generated_files"][0])
+
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated file is no longer available on the worker.")
+    return FileResponse(path, media_type="video/mp4", filename="microdrama.mp4")
 
 
 @APP.post("/jobs/{job_id}/cancel")
