@@ -1,53 +1,71 @@
 # AI Photoreal Microdrama Engine
 
-This module adds a provider-neutral GPU generation layer to Socialized. The Streamlit app remains the control plane; a rented GPU runs the heavy generation jobs only when requested.
+Socialized now contains a self-hosted GPU generation path for photorealistic microdramas. The Streamlit app is the control plane; a rented GPU runs open-weight video generation only when a job is submitted.
 
 ## Architecture
 
 ```text
-Streamlit / Vercel UI
+Streamlit / Socialized
+        |
+        +--> Gemini story + continuity plan
         |
         v
-  Supabase job record
+   GPU Worker API
+        |
+        +--> Wan2GP / WanGP
+        |      +--> text-to-video
+        |      +--> image-to-video
+        |      +--> reference-image workflows
+        |      +--> local audio/postprocessing
         |
         v
-   GPU worker API
-        |
-        +--> story/scene plan
-        +--> character references
-        +--> image generation
-        +--> video generation
-        +--> voice/audio
-        +--> FFmpeg assembly
+   MP4 returned to control plane
         |
         v
  Supabase Storage
         |
         v
- YouTube publishing
+ YouTube approval + publishing
 ```
 
 ## GPU strategy
 
-The worker is provider-neutral. Start with an RTX 4090 24GB class instance on RunPod or Vast.ai. Do not keep the GPU running when the queue is empty.
+Start with an RTX 4090 24GB-class rented instance. RunPod or Vast.ai can be used as the infrastructure provider; the application itself does not use their generation-credit APIs. The GPU worker is designed to be started only when needed and stopped when the queue is empty.
 
-The worker deliberately does not contain provider credentials. Provider-specific provisioning should be handled by the deployment platform, while this repository only receives jobs and produces assets.
+## Worker
 
-## First MVP
+`gpu_worker.py` exposes:
 
-1. Generate a microdrama brief from a premise.
-2. Split the story into short scenes.
-3. Keep character descriptions stable across scenes.
-4. Send scene jobs to the GPU worker.
-5. Generate visual/audio assets with locally hosted/open-source models.
-6. Assemble the final MP4 with FFmpeg.
-7. Upload the finished asset to Supabase Storage.
-8. Keep YouTube publishing behind the existing approval gate.
+- `GET /health` — worker health
+- `GET /models` — installed WanGP video models
+- `POST /jobs` — submit a generation job
+- `GET /jobs/{id}` — poll status
+- `GET /jobs/{id}/download` — retrieve the finished MP4
+- `POST /jobs/{id}/cancel` — request cancellation
 
-## Cost control
+Set `MICRODRAMA_WORKER_TOKEN` on the GPU worker and send the same token from Socialized. The worker can download public Supabase Storage reference images and pass them to WanGP as start/reference images.
 
-`GPU_IDLE_TIMEOUT_SECONDS` is used by the worker/orchestrator so a worker can be shut down after the queue becomes empty. The application never assumes a permanently running GPU.
+## GPU image
+
+`Dockerfile.gpu` builds a CUDA runtime containing Wan2GP plus the lightweight Socialized worker API. The model checkpoints are downloaded/configured by Wan2GP at deployment time rather than stored in this repository.
+
+## Story engine
+
+`services/microdrama.py` creates an original romance premise, characters, continuity bible, scene plan, visual prompts, dialogue and narration using the existing Gemini integration. This is text generation only; video generation happens on the self-hosted GPU.
+
+## Control panel
+
+`pages/4_🎬_Self_Hosted_Microdrama.py` provides the first end-to-end control flow:
+
+1. Write a romance premise.
+2. Generate the story and character continuity bible.
+3. Choose a WanGP model and output settings.
+4. Add character/reference image URLs.
+5. Submit a scene to the rented GPU.
+6. Poll the worker until the scene finishes.
+7. Store the resulting MP4 in Supabase Storage.
+8. Reuse the existing Socialized YouTube approval/publishing flow.
 
 ## Model policy
 
-Models are loaded from local/open-weight checkpoints configured at deployment time. No per-generation credit API is required by this architecture. Check each model's license before commercial use and keep any required attribution/disclosure.
+Video generation uses locally hosted/open-weight checkpoints. No per-generation video-credit API is required. Check the license of every model/checkpoint/LoRA before commercial use and preserve any required attribution or disclosure. Wan2GP's API documentation also requires products integrating WanGP to disclose that they use WanGP.
