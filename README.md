@@ -1,79 +1,286 @@
-# Socialized — YouTube Growth & Content Engine
+# Socialized — Ambient Worlds Content Engine
 
-A deployable Streamlit dashboard for researching, validating, generating, reviewing, rendering and publishing YouTube content. The existing campaign workflow remains intact, with a new **YouTube Growth Intelligence** page for demand discovery and topic validation.
+Socialized is a production web dashboard for creating and publishing long-form ambient video content. The current architecture uses **Vercel for the web app/API, Supabase for storage and job queues, and GitHub Actions as the production rendering and publishing worker**.
 
-## Growth Intelligence upgrade
-
-The new `pages/01_YouTube_Growth_Intelligence.py` adds:
-
-- Google Trends Trending Now discovery by market
-- YouTube public-search opportunity checks through the YouTube Data API
-- Reproducible 0–100 opportunity scoring using demand, YouTube performance, monetization, competition and freshness
-- AI-assisted title generation with a local headline-quality score
-- Campaign generation and direct saving into the existing Socialized campaign system
-- A Canva-style 1280×720 thumbnail template generator
-- Optional human validation using vidIQ and AMI scores without fragile browser scraping
-
-Google Trends is used for discovery; it is not treated as a precise search-volume API. YouTube Data API is used for public search and video statistics. Google documents the Data API and its API-key/OAuth requirements in its developer documentation.
-
-## Existing features
-
-- Channel/niche configuration
-- RSS topic research
-- Gemini-assisted ideas, scripts, titles, descriptions and tags
-- Supabase campaign storage
-- Content approval queue
-- Automatic voiceover, thumbnail and MP4 generation
-- YouTube OAuth uploads
-- X publishing
-- Scheduled GitHub Actions worker
-- YouTube analytics snapshot
-- Docker support
-- No secrets committed to the repository
-
-## Project structure
+## Current production architecture
 
 ```text
-app.py
-pages/
-  01_YouTube_Growth_Intelligence.py
+User
+  │
+  ▼
+Vercel — Socialized dashboard + API
+  │
+  ├── Image upload
+  ├── Render job creation
+  ├── YouTube OAuth
+  └── YouTube channel selection
+  │
+  ▼
+Supabase
+  ├── Storage
+  ├── render_jobs
+  └── youtube_publish_jobs
+  │
+  ▼
+GitHub Actions
+  ├── Ambient render worker
+  │     ├── FFmpeg
+  │     ├── MP4 rendering
+  │     └── thumbnail generation
+  │
+  └── YouTube publisher worker
+        ├── OAuth token use
+        ├── video upload
+        └── thumbnail upload
+  │
+  ▼
+YouTube
+```
+
+## Features
+
+### Ambient rendering
+
+- Upload an image directly from a device
+- Preview the selected environment image
+- Queue a render through the Vercel API
+- Store source images and render jobs in Supabase
+- GitHub Actions performs the production FFmpeg render
+- Generate and store a video thumbnail
+- Track render progress and completion
+- Preview/download the rendered video
+
+### YouTube connection
+
+- Connect a Google account through OAuth 2.0
+- Explicit Google account selection using `select_account`
+- Request offline access for background publishing
+- Discover the authenticated account's YouTube channels
+- Select the channel to publish to
+- Store the connection server-side
+- Keep OAuth secrets and refresh tokens out of the browser
+
+### YouTube publishing
+
+- Select a connected YouTube channel
+- Set video title and description
+- Add tags
+- Select Public, Unlisted or Private visibility
+- Publish the completed render through the GitHub Actions worker
+- Upload the generated thumbnail
+- Record publishing status, YouTube video ID and URL
+
+## Deployment model
+
+### Vercel
+
+Vercel hosts the Socialized frontend and serverless API routes.
+
+Production dashboard:
+
+`https://socialized-self.vercel.app/`
+
+The frontend is intentionally served as the single root `index.html`. There is no second frontend under `public/`.
+
+### Supabase
+
+Supabase is used for persistent application data and object storage, including:
+
+- source images
+- rendered videos
+- thumbnails
+- render jobs
+- YouTube connections
+- YouTube publishing jobs
+
+### GitHub Actions
+
+GitHub Actions is the production worker. It polls/receives queued work from Supabase and performs the resource-intensive processing that should not run inside Vercel serverless functions.
+
+The worker is responsible for FFmpeg rendering and YouTube publishing.
+
+## Repository structure
+
+```text
+index.html
+vercel.json
+package.json
+api/
+  upload-image.js
+  queue-render.js
+  youtube-connect.js
+  youtube-callback.js
+  youtube-select.js
+  youtube-connections.js
+  youtube-publish.js
+  youtube/
+    callback.js
+lib/
+  youtube-oauth.js
 services/
-  ai.py
-  campaigns.py
-  growth_intelligence.py
-  research.py
-  auto_media.py
-  youtube.py
-.github/workflows/daily_worker.yml
-requirements.txt
-Dockerfile
+  __init__.py
+  ...
+workers/
+  ...
+.github/workflows/
+  ambient_render_worker.yml
+  youtube_publisher.yml
+migrations/
+  ...
 .env.example
 .gitignore
+README.md
 ```
 
-## Required secrets
+## Important architecture rule
 
-Existing publishing secrets remain unchanged. For the new Growth Intelligence page, add:
+**GitHub Actions is the worker.** Do not reintroduce Render, Railway, Streamlit, or another long-running worker service for the production rendering pipeline.
 
-```toml
-GEMINI_API_KEY = "..."
-YOUTUBE_API_KEY = "..."
+Vercel handles requests and queue creation. Supabase holds persistent state and files. GitHub Actions performs the background rendering and publishing.
+
+The old Streamlit application/deployment has been removed from the production architecture.
+
+## Required environment variables
+
+### Vercel
+
+Configure the following in the Vercel project environment settings as applicable to the deployed API:
+
+```text
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+GOOGLE_REDIRECT_URI
 ```
 
-`YOUTUBE_API_KEY` is used only for public YouTube search/statistics checks. Publishing still uses the existing OAuth flow.
+`GOOGLE_REDIRECT_URI` must exactly match the authorized redirect URI configured in the Google OAuth client.
 
-## vidIQ and AMI
+Production callback:
 
-Socialized deliberately does **not** scrape logged-in vidIQ or AMI pages. Their scores can be used as optional human validation inputs while the application keeps its own reproducible scoring layer. This avoids brittle browser automation and account/session dependencies.
+```text
+https://socialized-self.vercel.app/api/youtube/callback
+```
 
-## Thumbnail workflow
+### GitHub Actions
 
-The built-in generator creates a clean, high-contrast creator template. It can be downloaded and further customized in Canva when desired. The content pipeline remains usable without Canva credentials.
+Configure the worker secrets in the repository's GitHub Actions secrets:
 
-## YouTube publishing note
+```text
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+GOOGLE_CLIENT_ID
+GOOGLE_CLIENT_SECRET
+```
 
-YouTube's Data API supports video insertion and metadata updates, but Google currently requires authorization for write operations. Unverified API projects may also have upload visibility restrictions until the project is audited. Keep the approval gate enabled until the channel workflow is proven stable.
+Add any additional worker-specific secrets required by the current workflow, but never commit credentials to the repository.
 
-## Safety and platform compliance
+## Google OAuth setup
 
-Only upload content you have permission to use. Respect YouTube policies, copyright, privacy, disclosure requirements and API quotas. Socialized does not attempt to bypass platform limits or moderation.
+1. Create/select the Google Cloud project used for YouTube publishing.
+2. Enable **YouTube Data API v3**.
+3. Configure the OAuth consent screen.
+4. Use the existing Web application OAuth client when appropriate.
+5. Add the production callback URI to the OAuth client's authorized redirect URIs.
+6. Add the OAuth credentials to Vercel and GitHub Actions secrets.
+
+Socialized requests account selection so users can choose the Google account they want to authorize. After authorization, Socialized queries the authenticated YouTube account and presents the available channel for selection.
+
+Do not commit `client_secret.json`, OAuth refresh tokens, or any other credentials.
+
+## Job lifecycle
+
+### Render
+
+```text
+Upload image
+    ↓
+Vercel upload API
+    ↓
+Supabase Storage
+    ↓
+Create render_jobs record
+    ↓
+GitHub Actions ambient worker
+    ↓
+FFmpeg + thumbnail generation
+    ↓
+Supabase Storage
+    ↓
+Render marked complete
+```
+
+### YouTube publish
+
+```text
+Completed render
+    ↓
+Choose connected channel
+    ↓
+Create youtube_publish_jobs record
+    ↓
+GitHub Actions YouTube publisher
+    ↓
+YouTube videos.insert
+    ↓
+Upload generated thumbnail
+    ↓
+Save YouTube video ID/URL
+```
+
+## Troubleshooting
+
+### The dashboard appears to be an old version
+
+There must be only one production frontend: `/index.html`.
+
+Do not add a duplicate `public/index.html` or another static frontend. Such duplicates can cause Vercel deployments to serve an outdated interface.
+
+### Render stays at 0%
+
+Check, in order:
+
+1. The Vercel API successfully created a `render_jobs` record.
+2. The job has `status = queued`.
+3. GitHub Actions can access the Supabase URL/service-role secret.
+4. The Ambient Render Worker workflow is enabled and running.
+5. The worker can import the Python services package.
+6. FFmpeg is installed successfully on the GitHub runner.
+7. The worker updates the job status after processing.
+
+### YouTube says no connected account
+
+Check:
+
+1. Google OAuth completed without an error.
+2. The callback URI exactly matches Google Cloud configuration.
+3. The authenticated channel was selected.
+4. The selected channel was persisted to `youtube_connections`.
+5. The Vercel API has valid Supabase service-role credentials.
+6. The dashboard is reading the same production Supabase project.
+
+### YouTube publishing fails
+
+Check the `youtube_publish_jobs` record and GitHub Actions logs first. Confirm the selected channel, OAuth connection and worker secrets before retrying the job.
+
+## Security
+
+- Never commit API keys, OAuth client secrets or refresh tokens.
+- Keep service-role Supabase credentials server-side.
+- Do not expose YouTube refresh tokens to browser JavaScript.
+- Use the minimum OAuth scopes required for the feature.
+- Validate uploaded files and URLs before processing.
+- Keep production publishing behind an explicit user action.
+
+## Content and platform compliance
+
+Only upload images, audio and other media that you have permission to use. Respect YouTube copyright, privacy, disclosure, community and API policies. Do not use Socialized to bypass platform limits, moderation or access controls.
+
+## Development principle
+
+Keep the production system simple:
+
+**Vercel = app/API**  
+**Supabase = data/storage/queues**  
+**GitHub Actions = background worker**  
+**YouTube = publishing destination**
