@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'workers/ambient_worker.py'
+      - 'services/thumbnail.py'
       - '.github/workflows/ambient_worker.yml'
       - 'api/queue-render.js'
       - 'api/upload-image.js'
@@ -28,27 +29,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install worker dependencies
-        run: python -m pip install --upgrade pip requests
-
+        run: python -m pip install --upgrade pip requests Pillow
       - name: Install FFmpeg
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           ffmpeg -version | head -n 1
-
       - name: Verify required secrets
         shell: bash
         run: |
           test -n "$SUPABASE_URL" || { echo 'SUPABASE_URL secret is missing'; exit 1; }
           test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo 'SUPABASE_SERVICE_ROLE_KEY secret is missing'; exit 1; }
-
       - name: Process queued render
         run: python workers/ambient_worker.py
