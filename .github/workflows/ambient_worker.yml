@@ -2,6 +2,13 @@ name: Ambient Render Worker
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'workers/ambient_worker.py'
+      - '.github/workflows/ambient_worker.yml'
+      - 'api/queue-render.js'
+      - 'api/upload-image.js'
   schedule:
     - cron: '*/5 * * * *'
 
@@ -39,5 +46,5 @@ jobs:
       - name: Verify FFmpeg
         run: ffmpeg -version | head -n 1
 
-      - name: Process one queued render
+      - name: Process queued render
         run: python workers/ambient_worker.py
