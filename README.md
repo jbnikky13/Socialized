@@ -2,6 +2,12 @@
 
 Socialized is a production web dashboard for creating and publishing long-form ambient video content. The current architecture uses **Vercel for the web app/API, Supabase for storage and job queues, and GitHub Actions as the production rendering and publishing worker**.
 
+## Product
+
+**Production URL:** https://socialized-self.vercel.app/
+
+Use the production URL above for the live Socialized dashboard.
+
 ## Current production architecture
 
 ```text
@@ -76,9 +82,7 @@ YouTube
 
 Vercel hosts the Socialized frontend and serverless API routes.
 
-Production dashboard:
-
-`https://socialized-self.vercel.app/`
+**Production dashboard:** https://socialized-self.vercel.app/
 
 The frontend is intentionally served as the single root `index.html`. There is no second frontend under `public/`.
 
