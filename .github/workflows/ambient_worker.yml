@@ -30,6 +30,7 @@ jobs:
       SUPABASE_STORAGE_BUCKET: media-assets
       MAX_IMAGE_MB: 20
       PYTHONPATH: ${{ github.workspace }}
+      RENDER_JOB_ID: ${{ github.event.client_payload.job_id || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -51,7 +52,15 @@ jobs:
         run: |
           test -n "$SUPABASE_URL" || { echo 'SUPABASE_URL secret is missing'; exit 1; }
           test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo 'SUPABASE_SERVICE_ROLE_KEY secret is missing'; exit 1; }
+      - name: Show dispatch context
+        shell: bash
+        run: |
+          if [ -n "$RENDER_JOB_ID" ]; then
+            echo "Target render job: $RENDER_JOB_ID"
+          else
+            echo "No dispatch job ID; worker will use the scheduled/manual queue fallback."
+          fi
       - name: Verify worker imports
         run: python -c "from services.thumbnail import generate_thumbnail; print('Thumbnail service import passed')"
-      - name: Process queued render
+      - name: Process render
         run: python workers/ambient_worker.py
