@@ -34,12 +34,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
       - name: Install Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
       - name: Install worker dependencies
         run: python -m pip install --upgrade pip requests Pillow
+
       - name: Install FFmpeg
         shell: bash
         run: |
@@ -47,11 +50,21 @@ jobs:
           sudo apt-get install -y ffmpeg
           command -v ffmpeg
           ffmpeg -version | head -n 1
+
       - name: Verify required secrets
         shell: bash
         run: |
           test -n "$SUPABASE_URL" || { echo 'SUPABASE_URL secret is missing'; exit 1; }
           test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo 'SUPABASE_SERVICE_ROLE_KEY secret is missing'; exit 1; }
+
+      - name: Verify worker environment
+        shell: bash
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}"
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "PYTHONPATH: $PYTHONPATH"
+          python -c "import sys; print('Python path:', sys.path); import services; print('services import passed'); from services.thumbnail import generate_thumbnail; print('thumbnail import passed')"
+
       - name: Show dispatch context
         shell: bash
         run: |
@@ -60,7 +73,9 @@ jobs:
           else
             echo "No dispatch job ID; worker will use the scheduled/manual queue fallback."
           fi
-      - name: Verify worker imports
-        run: python -c "from services.thumbnail import generate_thumbnail; print('Thumbnail service import passed')"
+
       - name: Process render
-        run: python workers/ambient_worker.py
+        shell: bash
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}"
+          python workers/ambient_worker.py
