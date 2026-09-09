@@ -2,7 +2,7 @@ from __future__ import annotations
 import base64, hashlib, json, os, tempfile
 from pathlib import Path
 import requests
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -14,7 +14,11 @@ def get(path,params=None):
  r=requests.get(f'{URL}/rest/v1/{path}',headers=H,params=params,timeout=30);r.raise_for_status();return r.json()
 def patch(path,params,data):
  r=requests.patch(f'{URL}/rest/v1/{path}',headers={**H,'Prefer':'return=minimal'},params=params,json=data,timeout=30);r.raise_for_status()
-def cipher(): return Fernet(base64.urlsafe_b64encode(hashlib.sha256(KEY.encode()).digest()))
+def decrypt_token(value):
+ iv_b64, tag_b64, data_b64 = str(value).split('.')
+ iv=base64.urlsafe_b64decode(iv_b64+'==='); tag=base64.urlsafe_b64decode(tag_b64+'==='); data=base64.urlsafe_b64decode(data_b64+'===')
+ plain=AESGCM(hashlib.sha256(KEY.encode()).digest()).decrypt(iv, data+tag, None)
+ return plain.decode()
 def download(url,path):
  with requests.get(url,stream=True,timeout=(15,300)) as r:
   r.raise_for_status()
@@ -27,7 +31,7 @@ def main():
  job=jobs[0]; patch('youtube_publish_jobs',{'id':f"eq.{job['id']}", 'status':'eq.queued'},{'status':'processing'})
  try:
   conn=get('youtube_connections',{'select':'token_json,channel_title','channel_id':f"eq.{job['channel_id']}",'limit':'1'})[0]
-  token=cipher().decrypt(conn['token_json'].encode()).decode(); creds=Credentials.from_authorized_user_info(json.loads(token),SCOPES)
+  token=decrypt_token(conn['token_json']); creds=Credentials.from_authorized_user_info(json.loads(token),SCOPES)
   if creds.expired and creds.refresh_token: creds.refresh(Request())
   if not creds.valid: raise RuntimeError('YouTube authorization expired; reconnect the channel.')
   yt=build('youtube','v3',credentials=creds)
