@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { dispatchRenderRequested } = require('../lib/github-app.js');
 
 function parseJsonBody(req) {
   if (!req.body) return {};
@@ -10,28 +11,6 @@ function validateHttpUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
   try { const u = new URL(value.trim()); return u.protocol === 'http:' || u.protocol === 'https:'; }
   catch { return false; }
-}
-
-async function requestGitHubWorker() {
-  const token = process.env.GITHUB_DISPATCH_TOKEN;
-  if (!token) return { dispatched: false, reason: 'GITHUB_DISPATCH_TOKEN is not configured; scheduled worker will pick up the queue.' };
-  const owner = process.env.GITHUB_REPO_OWNER || 'jbnikky13';
-  const repo = process.env.GITHUB_REPO_NAME || 'Socialized';
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
-    method: 'POST',
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ event_type: 'render_requested' }),
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GitHub worker dispatch failed (HTTP ${response.status}): ${text.slice(0, 300)}`);
-  }
-  return { dispatched: true };
 }
 
 module.exports = async (req, res) => {
@@ -66,9 +45,10 @@ module.exports = async (req, res) => {
     if (error) throw error;
 
     let worker = { dispatched: false };
-    try { worker = await requestGitHubWorker(); }
-    catch (dispatchError) {
-      console.error('GitHub dispatch warning:', dispatchError);
+    try {
+      worker = await dispatchRenderRequested();
+    } catch (dispatchError) {
+      console.error('GitHub App dispatch warning:', dispatchError);
       worker = { dispatched: false, reason: dispatchError.message };
     }
 
