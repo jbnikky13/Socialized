@@ -8,6 +8,7 @@ SUPABASE_URL=os.environ['SUPABASE_URL'].rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY=os.environ['SUPABASE_SERVICE_ROLE_KEY']
 BUCKET=os.getenv('SUPABASE_STORAGE_BUCKET','media-assets')
 MAX_IMAGE_MB=int(os.getenv('MAX_IMAGE_MB','20'))
+RENDER_JOB_ID=os.getenv('RENDER_JOB_ID','').strip()
 HEADERS={'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','Content-Type':'application/json'}
 def sb_get(path,params=None):
  r=requests.get(f'{SUPABASE_URL}/rest/v1/{path}',headers=HEADERS,params=params,timeout=30); r.raise_for_status(); return r.json()
@@ -37,8 +38,18 @@ def upload(path,storage_path,content_type):
  url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'; headers={'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','Content-Type':content_type,'x-upsert':'true'}
  with path.open('rb') as fh:r=requests.post(url,headers=headers,data=fh,timeout=300)
  r.raise_for_status(); return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
-def claim_job():
- rows=sb_get('render_jobs',{'select':'*','status':'eq.queued','order':'created_at.asc','limit':'1'})
+def claim_job(job_id=None):
+ if job_id:
+  rows=sb_get('render_jobs',{'select':'*','id':f'eq.{job_id}','status':'eq.queued','limit':'1'})
+  if not rows:
+   existing=sb_get('render_jobs',{'select':'id,status,progress,error','id':f'eq.{job_id}','limit':'1'})
+   if existing:
+    print(f'Dispatched render job {job_id} is not queued (status={existing[0].get("status")}).')
+   else:
+    print(f'Dispatched render job {job_id} was not found.')
+   return None
+ else:
+  rows=sb_get('render_jobs',{'select':'*','status':'eq.queued','order':'created_at.asc','limit':'1'})
  if not rows:return None
  job=rows[0]; update_job(job['id'],status='processing',progress=5); return job
 def process(job):
@@ -46,9 +57,9 @@ def process(job):
  with tempfile.TemporaryDirectory(prefix='socialized-') as td:
   root=Path(td); image=root/'environment.jpg'; output=root/'ambient.mp4'; thumb=root/'thumbnail.jpg'; update_job(job_id,progress=10); download_image(image_url,image); update_job(job_id,progress=25); generate_thumbnail(image,thumb,title,label); update_job(job_id,progress=35); run_ffmpeg(image,output,duration_hours); update_job(job_id,progress=75); video_path=f'jobs/{job_id}/ambient.mp4'; thumb_path=f'jobs/{job_id}/thumbnail.jpg'; video_url=upload(output,video_path,'video/mp4'); thumb_url=upload(thumb,thumb_path,'image/jpeg'); update_job(job_id,status='completed',progress=100,result={'title':title,'public_url':video_url,'video_url':video_url,'thumbnail_url':thumb_url,'video_storage_path':video_path,'thumbnail_storage_path':thumb_path,'duration_hours':duration_hours})
 def main():
- job=claim_job()
- if not job:print('No queued ambient render jobs.');return
+ job=claim_job(RENDER_JOB_ID or None)
+ if not job: print('No target/queued ambient render jobs.'); return
  print(f'Processing render job {job["id"]}')
- try:process(job);print(f'Completed render job {job["id"]}')
- except Exception as exc:print(f'Render job failed: {exc}');update_job(job['id'],status='failed',progress=0,error=str(exc));raise
+ try: process(job); print(f'Completed render job {job["id"]}')
+ except Exception as exc: print(f'Render job failed: {exc}'); update_job(job['id'],status='failed',progress=0,error=str(exc)); raise
 if __name__=='__main__':main()
