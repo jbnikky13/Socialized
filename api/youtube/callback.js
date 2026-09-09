@@ -1,1 +1,1 @@
-export { default } from '../youtube-callback.js';
+module.exports = require('../youtube-callback.js');
