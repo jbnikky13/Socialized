@@ -24,9 +24,7 @@ module.exports = async (req, res) => {
     const body = parseJsonBody(req);
     const payload = body.payload || {};
     const imageUrl = typeof payload.image_url === 'string' ? payload.image_url.trim() : '';
-    if (!validateHttpUrl(imageUrl)) {
-      return res.status(400).json({ error: 'payload.image_url must be a complete http(s) URL.' });
-    }
+    if (!validateHttpUrl(imageUrl)) return res.status(400).json({ error: 'payload.image_url must be a complete http(s) URL.' });
 
     const cleanPayload = {
       ...payload,
@@ -45,25 +43,15 @@ module.exports = async (req, res) => {
       status: 'queued',
       progress: 0,
     }).select().single();
-
     if (error) throw error;
 
     try {
-      const worker = await dispatchRenderRequested();
+      const worker = await dispatchRenderRequested(data.id);
       return res.status(202).json({ job: data, worker });
     } catch (dispatchError) {
-      // Never hide a worker-dispatch failure behind a misleading 0% queued state.
       console.error('GitHub App dispatch failed:', dispatchError);
-      await sb.from('render_jobs').update({
-        status: 'failed',
-        error: `Worker dispatch failed: ${dispatchError.message || 'unknown error'}`,
-      }).eq('id', data.id);
-
-      return res.status(502).json({
-        error: 'Render job was created, but GitHub Actions could not be started.',
-        detail: dispatchError.message || 'GitHub App dispatch failed',
-        job_id: data.id,
-      });
+      await sb.from('render_jobs').update({ status: 'failed', error: `Worker dispatch failed: ${dispatchError.message || 'unknown error'}` }).eq('id', data.id);
+      return res.status(502).json({ error: 'Render job was created, but GitHub Actions could not be started.', detail: dispatchError.message || 'GitHub App dispatch failed', job_id: data.id });
     }
   } catch (e) {
     console.error('queue-render failed:', e);
