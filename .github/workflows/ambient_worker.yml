@@ -2,6 +2,8 @@ name: Ambient Render Worker
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [render_requested]
   push:
     branches: [main]
     paths:
@@ -42,6 +44,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          command -v ffmpeg
           ffmpeg -version | head -n 1
       - name: Verify required secrets
         shell: bash
