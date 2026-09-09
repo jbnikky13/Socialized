@@ -8,10 +8,30 @@ function parseJsonBody(req) {
 
 function validateHttpUrl(value) {
   if (typeof value !== 'string' || !value.trim()) return false;
-  try {
-    const u = new URL(value.trim());
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch { return false; }
+  try { const u = new URL(value.trim()); return u.protocol === 'http:' || u.protocol === 'https:'; }
+  catch { return false; }
+}
+
+async function requestGitHubWorker() {
+  const token = process.env.GITHUB_DISPATCH_TOKEN;
+  if (!token) return { dispatched: false, reason: 'GITHUB_DISPATCH_TOKEN is not configured; scheduled worker will pick up the queue.' };
+  const owner = process.env.GITHUB_REPO_OWNER || 'jbnikky13';
+  const repo = process.env.GITHUB_REPO_NAME || 'Socialized';
+  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ event_type: 'render_requested' }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub worker dispatch failed (HTTP ${response.status}): ${text.slice(0, 300)}`);
+  }
+  return { dispatched: true };
 }
 
 module.exports = async (req, res) => {
@@ -24,9 +44,7 @@ module.exports = async (req, res) => {
     const body = parseJsonBody(req);
     const payload = body.payload || {};
     const imageUrl = typeof payload.image_url === 'string' ? payload.image_url.trim() : '';
-    if (!validateHttpUrl(imageUrl)) {
-      return res.status(400).json({ error: 'payload.image_url must be a complete http(s) URL, for example https://example.com/room.jpg' });
-    }
+    if (!validateHttpUrl(imageUrl)) return res.status(400).json({ error: 'payload.image_url must be a complete http(s) URL.' });
 
     const cleanPayload = {
       ...payload,
@@ -45,9 +63,16 @@ module.exports = async (req, res) => {
       status: 'queued',
       progress: 0,
     }).select().single();
-
     if (error) throw error;
-    return res.status(202).json({ job: data });
+
+    let worker = { dispatched: false };
+    try { worker = await requestGitHubWorker(); }
+    catch (dispatchError) {
+      console.error('GitHub dispatch warning:', dispatchError);
+      worker = { dispatched: false, reason: dispatchError.message };
+    }
+
+    return res.status(202).json({ job: data, worker });
   } catch (e) {
     console.error('queue-render failed:', e);
     return res.status(500).json({ error: e.message || 'Queue failed' });
