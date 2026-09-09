@@ -12,11 +12,12 @@ concurrency:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       SUPABASE_STORAGE_BUCKET: media-assets
+      MAX_IMAGE_MB: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +29,12 @@ jobs:
 
       - name: Install worker dependencies
         run: python -m pip install --upgrade pip requests
+
+      - name: Verify required secrets
+        shell: bash
+        run: |
+          test -n "$SUPABASE_URL" || { echo 'SUPABASE_URL secret is missing'; exit 1; }
+          test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo 'SUPABASE_SERVICE_ROLE_KEY secret is missing'; exit 1; }
 
       - name: Verify FFmpeg
         run: ffmpeg -version | head -n 1
