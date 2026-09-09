@@ -1,5 +1,8 @@
 {
   "private": true,
   "name": "socialized",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0"
+  }
 }
