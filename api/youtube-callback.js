@@ -1,31 +1,19 @@
-import { googleToken, parseCookies, verifyState, redirectUri, encryptSecret, supabase, clearCookie, requiredEnv } from '../lib/youtube-oauth.js';
-
-export default async function handler(req, res) {
-  if (req.method !== 'GET') return res.status(405).send('Method not allowed');
-  try {
-    const { code, state, error, error_description } = req.query || {};
-    if (error) return res.status(400).send(`<h2>YouTube connection cancelled</h2><p>${esc(error_description || error)}</p><a href="/">Return to Socialized</a>`);
-    const cookies = parseCookies(req);
-    if (!state || !verifyState(state) || cookies.socialized_oauth_state !== state) return res.status(400).send('<h2>Invalid or expired OAuth state</h2><p>Please start the connection again.</p>');
-    if (!code) return res.status(400).send('<h2>Missing Google authorization code</h2>');
-    const tokens = await googleToken({ code, grant_type: 'authorization_code' });
-    if (!tokens.refresh_token) return res.status(400).send('<h2>No refresh token returned</h2><p>Disconnect/reconnect Socialized in Google permissions, then try again.</p>');
-    const auth = { access_token: tokens.access_token, refresh_token: tokens.refresh_token, token_type: tokens.token_type || 'Bearer', scope: tokens.scope || '', expiry_date: Date.now() + Number(tokens.expires_in || 3600) * 1000 };
-    const access = tokens.access_token;
-    const [profileRes, channelsRes] = await Promise.all([
-      fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { Authorization: `Bearer ${access}` } }),
-      fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&mine=true', { headers: { Authorization: `Bearer ${access}` } })
-    ]);
-    const profile = await profileRes.json(); const channels = await channelsRes.json();
-    if (!channelsRes.ok) throw new Error(channels.error?.message || 'Could not retrieve YouTube channels');
-    if (!channels.items?.length) throw new Error('No YouTube channel was found for this Google account.');
-    const tokenJson = encryptSecret(JSON.stringify(auth));
-    const rows = channels.items.map(channel => ({ google_account_id: profile.sub || null, google_email: profile.email || null, channel_id: channel.id, channel_title: channel.snippet?.title || 'YouTube channel', channel_thumbnail_url: channel.snippet?.thumbnails?.default?.url || null, token_json: tokenJson, active: false, updated_at: new Date().toISOString() }));
-    await supabase('youtube_connections?on_conflict=channel_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows) });
-    const safeChannels = channels.items.map(c => ({ channel_id: c.id, channel_title: c.snippet?.title || 'YouTube channel', channel_thumbnail_url: c.snippet?.thumbnails?.default?.url || null, google_email: profile.email || null }));
-    res.setHeader('Set-Cookie', [clearCookie('socialized_oauth_state'), `youtube_pending=${encodeURIComponent(Buffer.from(JSON.stringify(safeChannels)).toString('base64url')}; Path=/; Max-Age=300; HttpOnly; Secure; SameSite=Lax`]);
-    return res.status(200).send(renderChooser(profile.email || 'Google account', safeChannels));
-  } catch (e) { console.error(e); return res.status(500).send(`<h2>YouTube connection failed</h2><p>${esc(e.message)}</p><a href="/">Return to Socialized</a>`); }
+import { googleToken, parseCookies, verifyState, redirectUri, encryptSecret, supabase, clearCookie, randomId } from '../lib/youtube-oauth.js';
+export default async function handler(req,res){
+ if(req.method!=='GET')return res.status(405).send('Method not allowed');
+ try{
+  const{code,state,error,error_description}=req.query||{};if(error)return res.status(400).send(`<h2>YouTube connection cancelled</h2><p>${esc(error_description||error)}</p><a href="/">Return to Socialized</a>`);
+  const cookies=parseCookies(req);if(!state||!verifyState(state)||cookies.socialized_oauth_state!==state)return res.status(400).send('<h2>Invalid or expired OAuth state</h2><p>Please start the connection again.</p>');if(!code)return res.status(400).send('<h2>Missing Google authorization code</h2>');
+  const tokens=await googleToken({code,grant_type:'authorization_code'});if(!tokens.refresh_token)return res.status(400).send('<h2>No refresh token returned</h2><p>Disconnect/reconnect Socialized in Google permissions, then try again.</p>');
+  const auth={access_token:tokens.access_token,refresh_token:tokens.refresh_token,token_type:tokens.token_type||'Bearer',scope:tokens.scope||'',expiry_date:Date.now()+Number(tokens.expires_in||3600)*1000};
+  const access=tokens.access_token;const[profileRes,channelsRes]=await Promise.all([fetch('https://openidconnect.googleapis.com/v1/userinfo',{headers:{Authorization:`Bearer ${access}`}}),fetch('https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&mine=true',{headers:{Authorization:`Bearer ${access}`}})]);
+  const profile=await profileRes.json(),channels=await channelsRes.json();if(!channelsRes.ok)throw new Error(channels.error?.message||'Could not retrieve YouTube channels');if(!channels.items?.length)throw new Error('No YouTube channel was found for this Google account.');
+  const tokenJson=encryptSecret(JSON.stringify(auth));const connectionKey=randomId(32);const rows=channels.items.map(channel=>({google_account_id:profile.sub||null,google_email:profile.email||null,channel_id:channel.id,channel_title:channel.snippet?.title||'YouTube channel',channel_thumbnail_url:channel.snippet?.thumbnails?.default?.url||null,token_json:tokenJson,connection_key:connectionKey,active:false,updated_at:new Date().toISOString()}));
+  await supabase('youtube_connections?on_conflict=channel_id',{method:'POST',headers:{Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows)});
+  const safeChannels=channels.items.map(c=>({channel_id:c.id,channel_title:c.snippet?.title||'YouTube channel',channel_thumbnail_url:c.snippet?.thumbnails?.default?.url||null,google_email:profile.email||''}));
+  res.setHeader('Set-Cookie',[clearCookie('socialized_oauth_state'),`youtube_connection_key=${encodeURIComponent(connectionKey)}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,`youtube_pending=${encodeURIComponent(Buffer.from(JSON.stringify(safeChannels)).toString('base64url'))}; Path=/; Max-Age=300; HttpOnly; Secure; SameSite=Lax`]);
+  return res.status(200).send(renderChooser(profile.email||'Google account',safeChannels));
+ }catch(e){console.error(e);return res.status(500).send(`<h2>YouTube connection failed</h2><p>${esc(e.message)}</p><a href="/">Return to Socialized</a>`)}
 }
-function esc(v=''){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
-function renderChooser(email, channels){return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose YouTube channel</title><style>body{font-family:system-ui;background:#0d1020;color:#fff;padding:32px}main{max-width:650px;margin:auto}section{background:#171b31;border:1px solid #2a3154;border-radius:18px;padding:24px}.channel{display:flex;gap:14px;align-items:center;width:100%;margin:10px 0;padding:14px;border:1px solid #30385c;border-radius:12px;background:#10152a;color:#fff;text-align:left;cursor:pointer}.channel img{width:52px;height:52px;border-radius:50%}.muted{opacity:.7}</style></head><body><main><h1>▶ Choose YouTube channel</h1><p class="muted">Google account: ${esc(email)}</p><section>${channels.map(c=>`<button class="channel" onclick="selectChannel('${esc(c.channel_id)}')"><img src="${esc(c.channel_thumbnail_url||'')}" alt=""><span><strong>${esc(c.channel_title)}</strong><br><small>Select this channel</small></span></button>`).join('')}</section></main><script>async function selectChannel(id){const r=await fetch('/api/youtube-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel_id:id})});const j=await r.json();if(!r.ok){alert(j.error||'Could not select channel');return}location.href='/?youtube_connected=1'}</script></body></html>`;}
+function esc(v=''){return String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+function renderChooser(email,channels){return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose YouTube channel</title><style>body{font-family:system-ui;background:#0d1020;color:#fff;padding:32px}main{max-width:650px;margin:auto}section{background:#171b31;border:1px solid #2a3154;border-radius:18px;padding:24px}.channel{display:flex;gap:14px;align-items:center;width:100%;margin:10px 0;padding:14px;border:1px solid #30385c;border-radius:12px;background:#10152a;color:#fff;text-align:left;cursor:pointer}.channel img{width:52px;height:52px;border-radius:50%}.muted{opacity:.7}</style></head><body><main><h1>▶ Choose YouTube channel</h1><p class="muted">Google account: ${esc(email)}</p><section>${channels.map(c=>`<button class="channel" onclick="selectChannel('${esc(c.channel_id)}')"><img src="${esc(c.channel_thumbnail_url||'')}" alt=""><span><strong>${esc(c.channel_title)}</strong><br><small>Select this channel</small></span></button>`).join('')}</section></main><script>async function selectChannel(id){const r=await fetch('/api/youtube-select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel_id:id})});const j=await r.json();if(!r.ok){alert(j.error||'Could not select channel');return}location.href='/?youtube_connected=1'}</script></body></html>`}
