@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -14,12 +12,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "media-assets")
 MAX_IMAGE_MB = int(os.getenv("MAX_IMAGE_MB", "20"))
-
-HEADERS = {
-    "apikey": SUPABASE_SERVICE_ROLE_KEY,
-    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-    "Content-Type": "application/json",
-}
+HEADERS = {"apikey": SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}", "Content-Type": "application/json"}
 
 
 def sb_get(path: str, params: dict | None = None):
@@ -33,15 +26,15 @@ def sb_patch(path: str, params: dict, payload: dict):
     r.raise_for_status()
 
 
+def update_job(job_id: str, **fields):
+    sb_patch("render_jobs", {"id": f"eq.{job_id}"}, fields)
+
+
 def validate_image_url(value: str) -> str:
     parsed = urlparse(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Environment image URL must be a complete public http(s) URL.")
     return value.strip()
-
-
-def update_job(job_id: str, **fields):
-    sb_patch("render_jobs", {"id": f"eq.{job_id}"}, fields)
 
 
 def download_image(url: str, destination: Path):
@@ -63,8 +56,6 @@ def download_image(url: str, destination: Path):
 
 def run_ffmpeg(image: Path, output: Path, duration_hours: float):
     duration = max(1.0, min(float(duration_hours or 0.0167) * 3600.0, 6 * 3600.0))
-    # A lightweight ambient render: still environment image + subtle generated rain/room-tone bed.
-    # It avoids shipping large audio assets and keeps the GitHub runner memory footprint low.
     cmd = [
         "ffmpeg", "-y", "-loop", "1", "-i", str(image),
         "-f", "lavfi", "-i", "anoisesrc=color=pink:amplitude=0.025:sample_rate=44100",
@@ -86,16 +77,11 @@ def upload(path: Path, storage_path: str) -> str:
 
 
 def claim_job():
-    # Claim the oldest queued job. The PATCH condition prevents two workers from
-    # processing the same row in normal single-run GitHub Actions operation.
     rows = sb_get("render_jobs", {"select": "*", "status": "eq.queued", "order": "created_at.asc", "limit": "1"})
     if not rows:
         return None
     job = rows[0]
-    try:
-        update_job(job["id"], status="processing", progress=5, started_at="now()")
-    except Exception:
-        return None
+    update_job(job["id"], status="processing", progress=5)
     return job
 
 
@@ -117,8 +103,7 @@ def process(job: dict):
         update_job(job_id, progress=80)
         storage_path = f"jobs/{job_id}/ambient.mp4"
         public_url = upload(output, storage_path)
-        result = {"title": title, "public_url": public_url, "storage_path": storage_path, "duration_hours": duration_hours}
-        update_job(job_id, status="completed", progress=100, result=result, completed_at="now()")
+        update_job(job_id, status="completed", progress=100, result={"title": title, "public_url": public_url, "storage_path": storage_path, "duration_hours": duration_hours})
 
 
 def main():
@@ -132,10 +117,7 @@ def main():
         print(f"Completed render job {job['id']}")
     except Exception as exc:
         print(f"Render job failed: {exc}")
-        try:
-            update_job(job["id"], status="failed", progress=0, error=str(exc))
-        except Exception as update_exc:
-            print(f"Could not update failed job: {update_exc}")
+        update_job(job["id"], status="failed", progress=0, error=str(exc))
         raise
 
 
