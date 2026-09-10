@@ -18,11 +18,11 @@ on:
   schedule:
     - cron: '*/5 * * * *'
 
-# One renderer at a time prevents two workers from claiming the same queued job.
-# A targeted repository_dispatch starts the worker immediately for a new job;
-# the 5-minute schedule remains a recovery path if a dispatch is missed.
+# A dispatched job gets its own concurrency group so a previous long render
+# cannot block a newly queued job from starting. Scheduled/manual runs use
+# their own run id and remain a fallback queue sweeper.
 concurrency:
-  group: socialized-ambient-worker
+  group: socialized-ambient-${{ github.event.client_payload.job_id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
