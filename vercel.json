@@ -5,6 +5,12 @@
       "maxDuration": 60
     }
   },
+  "rewrites": [
+    {
+      "source": "/api/delete-image",
+      "destination": "/api/delete-rendered-video"
+    }
+  ],
   "headers": [
     {
       "source": "/",
