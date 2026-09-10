@@ -11,12 +11,16 @@ on:
       - 'workers/ambient_worker_v2.py'
       - 'services/__init__.py'
       - 'services/thumbnail.py'
+      - 'services/scene_motion.py'
       - '.github/workflows/ambient_worker.yml'
       - 'api/queue-render.js'
       - 'api/upload-image.js'
   schedule:
     - cron: '*/5 * * * *'
 
+# One renderer at a time prevents two workers from claiming the same queued job.
+# A targeted repository_dispatch starts the worker immediately for a new job;
+# the 5-minute schedule remains a recovery path if a dispatch is missed.
 concurrency:
   group: socialized-ambient-worker
   cancel-in-progress: false
@@ -57,7 +61,7 @@ jobs:
         shell: bash
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}"
-          python -c "import sys; print('Python path:', sys.path); import services; print('services import passed'); from services.thumbnail import generate_thumbnail; print('thumbnail import passed')"
+          python -c "import sys; print('Python path:', sys.path); import services; print('services import passed'); from services.thumbnail import generate_thumbnail; print('thumbnail import passed'); from services.scene_motion import make_scene_overlay; print('scene motion import passed')"
       - name: Show dispatch context
         shell: bash
         run: |
