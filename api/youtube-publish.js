@@ -13,8 +13,9 @@ module.exports=async(req,res)=>{
   const {data:render,error:renderError}=await sb.from('render_jobs').select('id,status,result,payload').eq('id',body.render_job_id).single();
   if(renderError)throw renderError;
   if(render.status!=='completed')return res.status(409).json({error:'Render must be completed before publishing.'});
-  const {data:conn,error:connError}=await sb.from('youtube_connections').select('channel_id,channel_title,connection_key').eq('connection_key',key).eq('channel_id',channel).eq('active',false).single();
+  const {data:conn,error:connError}=await sb.from('youtube_connections').select('channel_id,channel_title,connection_key,active').eq('connection_key',key).eq('channel_id',channel).eq('active',true).maybeSingle();
   if(connError)throw connError;
+  if(!conn)return res.status(409).json({error:'The selected YouTube channel is no longer active. Reconnect and select it again.'});
   const title=String(body.title||render.result?.title||render.payload?.title||'Ambient World').slice(0,100);
   const description=String(body.description||'').slice(0,5000);
   const tags=Array.isArray(body.tags)?body.tags.map(String).slice(0,30):[];
