@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, tempfile, time, json
+import os, subprocess, tempfile, time, json, re
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageStat
@@ -25,7 +25,7 @@ def update_job(job_id,**fields):
 def download_image(url,destination):
  p=urlparse(str(url).strip())
  if p.scheme not in {'http','https'} or not p.netloc: raise ValueError('Environment image URL must be a complete public http(s) URL.')
- with requests.get(str(url).strip(),stream=True,timeout=(15,60),headers={'User-Agent':'Socialized-Ambient-Worker/3.0'}) as r:
+ with requests.get(str(url).strip(),stream=True,timeout=(15,60),headers={'User-Agent':'Socialized-Ambient-Worker/4.0'}) as r:
   r.raise_for_status(); ct=(r.headers.get('content-type') or '').lower()
   if not ct.startswith('image/'): raise ValueError(f'Environment URL did not return an image (content-type: {ct or "unknown"}).')
   total=0
@@ -37,18 +37,53 @@ def download_image(url,destination):
      fh.write(chunk)
 
 def choose_sound(image_path,title=''):
- text=(title or '').lower()
- for words,kind in [(('rain','rainy','storm','window','wet','puddle'),'rain'),(('fireplace','fire','hearth','cabin','cozy','candle'),'fireplace'),(('forest','woods','jungle','garden','green','trees'),'forest'),(('snow','winter','ice','frost','mountain'),'snow'),(('cafe','coffee','library','study','book'),'cafe')]:
-  if any(w in text for w in words): return kind,'title'
- try:
-  img=Image.open(image_path).convert('RGB').resize((48,48)); r,g,b=ImageStat.Stat(img).mean; brightness=(r+g+b)/3
-  if b>r*1.12 and b>g*1.03:return 'rain','image'
-  if g>r*1.08 and g>b*1.12:return 'forest','image'
-  if r>g*1.10 and r>b*1.25 and brightness<205:return 'fireplace','image'
-  if brightness>220 and b>=r*0.95:return 'snow','image'
-  if brightness<85:return 'rain','image'
- except Exception as exc: print(f'Audio scene analysis fallback: {exc}')
- return 'room_tone','fallback'
+ """Choose the visual effect from the uploaded image first.
+
+    This deliberately does NOT let a generic title such as 'cozy night' override
+    the photo. We score image color/brightness/contrast features, then use title
+    words only as a small tie-breaker. This prevents rain/fire effects from being
+    selected just because the title contains a keyword.
+ """
+ title_text=(title or '').lower()
+ img=Image.open(image_path).convert('RGB').resize((128,128))
+ pixels=list(img.getdata())
+ n=max(1,len(pixels))
+ r=sum(p[0] for p in pixels)/n; g=sum(p[1] for p in pixels)/n; b=sum(p[2] for p in pixels)/n
+ brightness=(r+g+b)/3
+ warm=sum(1 for rr,gg,bb in pixels if rr>gg*1.12 and rr>bb*1.25 and rr>85)/n
+ blue=sum(1 for rr,gg,bb in pixels if bb>rr*1.12 and bb>gg*1.03)/n
+ green=sum(1 for rr,gg,bb in pixels if gg>rr*1.08 and gg>bb*1.08)/n
+ bright=sum(1 for rr,gg,bb in pixels if (rr+gg+bb)/3>205)/n
+ dark=sum(1 for rr,gg,bb in pixels if (rr+gg+bb)/3<85)/n
+ gray=sum(1 for rr,gg,bb in pixels if max(rr,gg,bb)-min(rr,gg,bb)<22)/n
+ scores={k:0.0 for k in ('rain','fireplace','forest','snow','cafe')}
+ # Image evidence gets the dominant weight.
+ scores['rain'] += blue*4.5 + dark*1.3 + (0.7 if brightness<125 else 0)
+ scores['fireplace'] += warm*5.0 + dark*1.0 + (0.8 if brightness<170 else 0)
+ scores['forest'] += green*5.0 + (0.5 if g>r and g>b else 0)
+ scores['snow'] += bright*2.7 + gray*1.4 + (0.8 if b>=r*0.95 and brightness>170 else 0)
+ scores['cafe'] += warm*1.0 + gray*1.1 + (0.5 if 90<brightness<210 else 0)
+
+ # Explicit visual keywords are only a small tie-breaker, never the main signal.
+ keyword_groups={
+  'rain':('rain','rainy','storm','wet','puddle','downpour','drizzle','monsoon'),
+  'fireplace':('fireplace','fire','hearth','flame','campfire','bonfire','candle'),
+  'forest':('forest','woods','jungle','garden','trees','nature','greenery'),
+  'snow':('snow','winter','ice','frost','blizzard'),
+  'cafe':('cafe','coffee','library','study','book','restaurant')
+ }
+ for kind,words in keyword_groups.items():
+  if any(re.search(r'\b'+re.escape(w)+r'\b',title_text) for w in words): scores[kind]+=1.25
+
+ kind=max(scores,key=scores.get)
+ # Avoid forcing a dramatic overlay on genuinely ambiguous images.
+ ranked=sorted(scores.values(),reverse=True)
+ confidence=(ranked[0]-ranked[1]) if len(ranked)>1 else ranked[0]
+ if confidence<0.45 and brightness>210 and blue<0.12:
+  kind='cafe'
+ source='image+title-tiebreaker'
+ print(f'Scene classifier: {kind} | scores={{{", ".join(f"{k}:{v:.2f}" for k,v in scores.items())}}} | brightness={brightness:.1f} blue={blue:.2f} green={green:.2f} warm={warm:.2f}')
+ return kind,source
 
 def audio_filter(kind):
  if kind=='rain':return 'anoisesrc=color=white:amplitude=0.055:sample_rate=44100,highpass=f=900,lowpass=f=9000,volume=0.72'
@@ -136,8 +171,7 @@ def _standard_upload(path,storage_path,content_type,job_id=None,progress_start=7
   time.sleep(2**attempt)
  raise RuntimeError('Supabase upload completed but the stored object could not be verified.')
 
-def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
- return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
+def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95): return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
 
 def claim_job(job_id=None):
  params={'select':'*','status':'eq.queued','limit':'1'}
