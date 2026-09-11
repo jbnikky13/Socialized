@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, tempfile, time, base64
+import os, subprocess, tempfile, time
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageStat
@@ -18,12 +18,14 @@ def sb_get(path,params=None):
  r=requests.get(f'{SUPABASE_URL}/rest/v1/{path}',headers=HEADERS,params=params,timeout=30); r.raise_for_status(); return r.json()
 def sb_patch(path,params,payload):
  r=requests.patch(f'{SUPABASE_URL}/rest/v1/{path}',headers={**HEADERS,'Prefer':'return=minimal'},params=params,json=payload,timeout=30); r.raise_for_status()
-def update_job(job_id,**fields): sb_patch('render_jobs',{'id':f'eq.{job_id}'},fields)
+def update_job(job_id,**fields):
+ try: sb_patch('render_jobs',{'id':f'eq.{job_id}'},fields)
+ except Exception as exc: print(f'Job update warning: {exc}')
 
 def download_image(url,destination):
  p=urlparse(str(url).strip())
  if p.scheme not in {'http','https'} or not p.netloc: raise ValueError('Environment image URL must be a complete public http(s) URL.')
- with requests.get(str(url).strip(),stream=True,timeout=(15,60),headers={'User-Agent':'Socialized-Ambient-Worker/2.0'}) as r:
+ with requests.get(str(url).strip(),stream=True,timeout=(15,60),headers={'User-Agent':'Socialized-Ambient-Worker/3.0'}) as r:
   r.raise_for_status(); ct=(r.headers.get('content-type') or '').lower()
   if not ct.startswith('image/'): raise ValueError(f'Environment URL did not return an image (content-type: {ct or "unknown"}).')
   total=0
@@ -64,7 +66,7 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=
   filter_complex='[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[base];[2:v]scale=1280:720:flags=bilinear[scene];[base][scene]overlay=shortest=1:format=auto,format=yuv420p[v];[1:a]atrim=0:%s,asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1,afade=t=out:st=%s:d=1,loudnorm=I=-15:LRA=7:TP=-1.5[a]'%(audio_duration,duration-1)
  else:
   filter_complex='[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v];[1:a]atrim=0:%s,asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1,afade=t=out:st=%s:d=1,loudnorm=I=-15:LRA=7:TP=-1.5[a]'%(audio_duration,duration-1)
- cmd=['ffmpeg','-y',*inputs,'-filter_complex',filter_complex,'-map','[v]','-map','[a]','-t',str(duration),'-r','30','-c:v','libx264','-preset','veryfast','-crf','28','-c:a','aac','-b:a','128k','-movflags','+faststart','-progress','pipe:1','-nostats',str(output)]
+ cmd=['ffmpeg','-y',*inputs,'-filter_complex',filter_complex,'-map','[v]','-map','[a]','-t',str(duration),'-r','30','-c:v','libx264','-preset','veryfast','-crf','28','-pix_fmt','yuv420p','-profile:v','main','-level','4.0','-c:a','aac','-b:a','128k','-ar','44100','-movflags','+faststart','-progress','pipe:1','-nostats',str(output)]
  proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
  last_progress=42
  if proc.stdout:
@@ -75,84 +77,76 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=
     except ValueError: continue
     pct_int=int(42+min(33,max(0,(out_time/max(duration,1))*33)))
     if job_id and pct_int>=last_progress+2:
-     try: update_job(job_id,progress=pct_int)
-     except Exception as exc: print(f'Progress update warning: {exc}')
-     last_progress=pct_int
+     update_job(job_id,progress=pct_int); last_progress=pct_int
  rc=proc.wait()
- if rc!=0:
-  err=(proc.stderr.read() if proc.stderr else '')[-6000:]
-  raise RuntimeError(f'ffmpeg failed with exit code {rc}: {err}')
+ stderr=proc.stderr.read() if proc.stderr else ''
+ if rc!=0: raise RuntimeError(f'ffmpeg failed with exit code {rc}: {stderr[-6000:]}')
+ if not output.exists() or output.stat().st_size < 1024: raise RuntimeError('FFmpeg reported success but produced an empty or tiny MP4.')
  if job_id: update_job(job_id,progress=75)
 
-def _storage_upload_endpoint():
- host=urlparse(SUPABASE_URL).netloc
- if host.endswith('.supabase.co'):
-  project=host[:-len('.supabase.co')]
-  return f'https://{project}.storage.supabase.co/storage/v1/upload/resumable'
- return f'{SUPABASE_URL}/storage/v1/upload/resumable'
+def validate_mp4(path,duration_hours):
+ if not path.exists(): raise RuntimeError('Rendered MP4 does not exist.')
+ size=path.stat().st_size
+ if size < 1024*10: raise RuntimeError(f'Rendered MP4 is suspiciously small ({size} bytes).')
+ probe=['ffprobe','-v','error','-show_entries','format=format_name,duration,size:stream=index,codec_type,codec_name,width,height,r_frame_rate','-of','json',str(path)]
+ p=subprocess.run(probe,capture_output=True,text=True,timeout=120)
+ if p.returncode!=0: raise RuntimeError(f'ffprobe rejected the rendered MP4: {p.stderr[-3000:]}')
+ import json
+ try: info=json.loads(p.stdout)
+ except Exception as exc: raise RuntimeError(f'ffprobe returned invalid JSON: {exc}')
+ fmt=info.get('format') or {}; streams=info.get('streams') or []
+ video=next((s for s in streams if s.get('codec_type')=='video'),None)
+ audio=next((s for s in streams if s.get('codec_type')=='audio'),None)
+ if not video: raise RuntimeError('Rendered MP4 has no video stream.')
+ if video.get('codec_name')!='h264': raise RuntimeError(f'Rendered MP4 video codec is {video.get("codec_name")}, expected h264.')
+ if int(video.get('width') or 0)!=1280 or int(video.get('height') or 0)!=720: raise RuntimeError('Rendered MP4 has unexpected video dimensions.')
+ if audio and audio.get('codec_name')!='aac': raise RuntimeError(f'Rendered MP4 audio codec is {audio.get("codec_name")}, expected aac.')
+ duration=float(fmt.get('duration') or 0)
+ expected=max(15.0,float(duration_hours or 1.0)*3600)
+ if duration < min(expected*0.98,expected-1): raise RuntimeError(f'Rendered MP4 duration is too short: {duration:.2f}s vs expected about {expected:.2f}s.')
+ decode=['ffmpeg','-v','error','-i',str(path),'-map','0:v:0','-map','0:a:0?','-f','null','-']
+ d=subprocess.run(decode,capture_output=True,text=True,timeout=max(180,int(duration/2)))
+ if d.returncode!=0: raise RuntimeError(f'Rendered MP4 decode validation failed: {d.stderr[-4000:]}')
+ print(f'Validated MP4: {size/1024/1024:.1f} MB, {duration/3600:.2f}h, h264/aac, 1280x720')
 
-def _public_url(storage_path):
- return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
+def _public_url(storage_path): return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
 
 def _standard_upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
- url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'
- size=path.stat().st_size
- with path.open('rb') as fh:
-  for attempt in range(4):
-   try:
-    rr=requests.post(url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Content-Type':content_type,'x-upsert':'true'},data=fh,timeout=600)
-    if rr.status_code in (200,201): return _public_url(storage_path)
-    if attempt==3: raise RuntimeError(f'Supabase standard upload failed ({rr.status_code}): {rr.text[:1000]}')
-   except requests.RequestException:
-    if attempt==3: raise
-    fh.seek(0); time.sleep(2**attempt)
- return _public_url(storage_path)
+ url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'; size=path.stat().st_size
+ last_pct=progress_start
+ for attempt in range(5):
+  try:
+   with path.open('rb') as fh:
+    rr=requests.post(url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Content-Type':content_type,'x-upsert':'true'},data=fh,timeout=900)
+   if rr.status_code in (200,201): break
+   detail=rr.text[:1000]
+   if attempt==4: raise RuntimeError(f'Supabase upload failed ({rr.status_code}): {detail}')
+   print(f'Supabase upload attempt {attempt+1} failed ({rr.status_code}); retrying.')
+  except requests.RequestException as exc:
+   if attempt==4: raise RuntimeError(f'Supabase upload request failed: {exc}')
+   print(f'Supabase upload attempt {attempt+1} failed: {exc}; retrying.')
+  time.sleep(2**attempt)
+ public=_public_url(storage_path)
+ # Verify that the object is really present before the job is marked complete.
+ for attempt in range(5):
+  try:
+   head=requests.head(public,timeout=30)
+   if head.status_code==200:
+    remote_size=int(head.headers.get('content-length','0') or 0)
+    if remote_size and remote_size != size: raise RuntimeError(f'Uploaded object size mismatch: local {size}, remote {remote_size}.')
+    probe=requests.get(public,headers={'Range':'bytes=0-31'},timeout=30)
+    if probe.status_code not in (200,206) or len(probe.content)<12 or probe.content[4:8]!=b'ftyp': raise RuntimeError('Uploaded MP4 failed storage playback probe: missing MP4 ftyp header.')
+    return public
+   print(f'Upload verification attempt {attempt+1}: HTTP {head.status_code}')
+  except requests.RequestException as exc: print(f'Upload verification warning: {exc}')
+  time.sleep(2**attempt)
+ raise RuntimeError('Supabase upload completed but the stored object could not be verified.')
 
 def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
- size=path.stat().st_size
- endpoint=_storage_upload_endpoint()
- # TUS Upload-Metadata is comma-separated with NO whitespace after commas.
- # Values must be base64; a space after a comma becomes part of the next key and
- # causes Supabase Storage to reject the entire upload with 400 Invalid upload-metadata.
- metadata=','.join([
-  'bucketName '+base64.b64encode(BUCKET.encode()).decode(),
-  'objectName '+base64.b64encode(storage_path.encode()).decode(),
-  'contentType '+base64.b64encode(content_type.encode()).decode(),
-  'cacheControl '+base64.b64encode(b'3600').decode()
- ])
- headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Length':str(size),'Upload-Metadata':metadata,'x-upsert':'true'}
- try:
-  r=requests.post(endpoint,headers=headers,timeout=60)
-  if r.status_code not in (201,204):
-   raise RuntimeError(f'Supabase resumable upload init failed ({r.status_code}): {r.text[:1000]}')
-  upload_url=r.headers.get('Location')
-  if not upload_url: raise RuntimeError('Supabase resumable upload did not return an upload URL.')
-  offset=0; chunk_size=6*1024*1024; last_pct=progress_start
-  with path.open('rb') as fh:
-   while offset<size:
-    chunk=fh.read(chunk_size)
-    if not chunk: break
-    sent=False
-    for attempt in range(5):
-     try:
-      rr=requests.patch(upload_url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Offset':str(offset),'Content-Type':'application/offset+octet-stream'},data=chunk,timeout=180)
-      if rr.status_code in (204,200):
-       offset=int(rr.headers.get('Upload-Offset',offset+len(chunk))); sent=True; break
-      if attempt==4: raise RuntimeError(f'Supabase resumable upload chunk failed ({rr.status_code}): {rr.text[:1000]}')
-     except requests.RequestException:
-      if attempt==4: raise
-      time.sleep(2**attempt)
-    if not sent: raise RuntimeError('Supabase resumable upload chunk could not be sent.')
-    if job_id and size:
-     pct=progress_start+int((offset/size)*(progress_end-progress_start))
-     if pct>=last_pct+2:
-      try: update_job(job_id,progress=min(progress_end,pct))
-      except Exception as exc: print(f'Upload progress warning: {exc}')
-      last_pct=pct
-  return _public_url(storage_path)
- except Exception as exc:
-  print(f'Resumable upload failed; retrying with standard Supabase upload: {exc}')
-  return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
+ # Use the stable object API directly. The previous TUS path could fail at
+ # initialization with "Invalid upload-metadata" and prevented completed renders
+ # from ever reaching the playable-video verification stage.
+ return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
 
 def claim_job(job_id=None):
  params={'select':'*','status':'eq.queued','limit':'1'}
@@ -169,7 +163,10 @@ def process(job):
   update_job(job_id,progress=10); download_image(image_url,image); update_job(job_id,progress=25); sound_kind,sound_source=choose_sound(image,title); update_job(job_id,progress=30); generate_thumbnail(image,thumb,title,label); update_job(job_id,progress=35)
   if sound_kind in {'rain','snow','fireplace','candle','forest','cafe'}:
    scene=root/'scene_overlay.mov'; make_scene_overlay(scene,sound_kind); update_job(job_id,progress=42)
-  run_ffmpeg(image,output,duration_hours,sound_kind,scene,job_id); video_path=f'jobs/{job_id}/ambient.mp4'; thumb_path=f'jobs/{job_id}/thumbnail.jpg'; video_url=upload(output,video_path,'video/mp4',job_id,75,96); thumb_url=upload(thumb,thumb_path,'image/jpeg',job_id,96,99); motion={'rain':'falling_rain','snow':'falling_snow','fireplace':'fire_glow','candle':'candle_flicker','forest':'forest_sway','cafe':'rising_steam'}.get(sound_kind,'static'); update_job(job_id,status='completed',progress=100,result={'title':title,'public_url':video_url,'video_url':video_url,'thumbnail_url':thumb_url,'video_storage_path':video_path,'thumbnail_storage_path':thumb_path,'duration_hours':duration_hours,'soundscape':sound_kind,'sound_source':sound_source,'loop_ready':True,'visual_motion':motion})
+  run_ffmpeg(image,output,duration_hours,sound_kind,scene,job_id); validate_mp4(output,duration_hours); update_job(job_id,progress=76)
+  video_path=f'jobs/{job_id}/ambient.mp4'; thumb_path=f'jobs/{job_id}/thumbnail.jpg'; video_url=upload(output,video_path,'video/mp4',job_id,76,96); thumb_url=upload(thumb,thumb_path,'image/jpeg',job_id,96,99)
+  motion={'rain':'falling_rain','snow':'falling_snow','fireplace':'fire_glow','candle':'candle_flicker','forest':'forest_sway','cafe':'rising_steam'}.get(sound_kind,'static')
+  update_job(job_id,status='completed',progress=100,result={'title':title,'public_url':video_url,'video_url':video_url,'thumbnail_url':thumb_url,'video_storage_path':video_path,'thumbnail_storage_path':thumb_path,'duration_hours':duration_hours,'soundscape':sound_kind,'sound_source':sound_source,'loop_ready':True,'visual_motion':motion})
 
 def main():
  job=claim_job(RENDER_JOB_ID or None)
