@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, tempfile
+import os, subprocess, tempfile, time, base64
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageStat
@@ -56,7 +56,7 @@ def audio_filter(kind):
  if kind=='cafe':return 'anoisesrc=color=brown:amplitude=0.045:sample_rate=44100,lowpass=f=2400,highpass=f=100,volume=0.68'
  return 'anoisesrc=color=brown:amplitude=0.038:sample_rate=44100,lowpass=f=900,volume=0.68'
 
-def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None):
+def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=None):
  duration=max(15.0,min(float(duration_hours or 1.0)*3600,6*3600)); audio_duration=duration+2
  inputs=['-loop','1','-i',str(image),'-f','lavfi','-t',str(audio_duration),'-i',audio_filter(sound_kind)]
  if scene_overlay: inputs += ['-stream_loop','-1','-i',str(scene_overlay)]
@@ -64,13 +64,64 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None):
   filter_complex='[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[base];[2:v]scale=1280:720:flags=bilinear[scene];[base][scene]overlay=shortest=1:format=auto,format=yuv420p[v];[1:a]atrim=0:%s,asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1,afade=t=out:st=%s:d=1,loudnorm=I=-15:LRA=7:TP=-1.5[a]'%(audio_duration,duration-1)
  else:
   filter_complex='[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p[v];[1:a]atrim=0:%s,asetpts=PTS-STARTPTS,afade=t=in:st=0:d=1,afade=t=out:st=%s:d=1,loudnorm=I=-15:LRA=7:TP=-1.5[a]'%(audio_duration,duration-1)
- cmd=['ffmpeg','-y',*inputs,'-filter_complex',filter_complex,'-map','[v]','-map','[a]','-t',str(duration),'-r','30','-c:v','libx264','-preset','veryfast','-crf','28','-c:a','aac','-b:a','128k','-movflags','+faststart',str(output)]
- subprocess.run(cmd,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ cmd=['ffmpeg','-y',*inputs,'-filter_complex',filter_complex,'-map','[v]','-map','[a]','-t',str(duration),'-r','30','-c:v','libx264','-preset','veryfast','-crf','28','-c:a','aac','-b:a','128k','-movflags','+faststart','-progress','pipe:1','-nostats',str(output)]
+ proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+ last_progress=42
+ if proc.stdout:
+  for line in proc.stdout:
+   line=line.strip()
+   if line.startswith('out_time_ms='):
+    try: out_time=int(line.split('=',1)[1])/1_000_000
+    except ValueError: continue
+    pct_int=int(42+min(33,max(0,(out_time/max(duration,1))*33)))
+    if job_id and pct_int>=last_progress+2:
+     update_job(job_id,progress=pct_int); last_progress=pct_int
+ rc=proc.wait()
+ if rc!=0:
+  err=(proc.stderr.read() if proc.stderr else '')[-6000:]
+  raise RuntimeError(f'ffmpeg failed with exit code {rc}: {err}')
+ if job_id: update_job(job_id,progress=75)
 
-def upload(path,storage_path,content_type):
- url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'; headers={'apikey':SUPABASE_SERVICE_ROLE_KEY,'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','Content-Type':content_type,'x-upsert':'true'}
- with path.open('rb') as fh:r=requests.post(url,headers=headers,data=fh,timeout=600)
- r.raise_for_status(); return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
+def _storage_upload_endpoint():
+ host=urlparse(SUPABASE_URL).netloc
+ if host.endswith('.supabase.co'):
+  project=host[:-len('.supabase.co')]
+  return f'https://{project}.storage.supabase.co/storage/v1/upload/resumable'
+ return f'{SUPABASE_URL}/storage/v1/upload/resumable'
+
+def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
+ size=path.stat().st_size
+ endpoint=_storage_upload_endpoint()
+ metadata=', '.join([
+  'bucketName '+base64.b64encode(BUCKET.encode()).decode(),
+  'objectName '+base64.b64encode(storage_path.encode()).decode(),
+  'contentType '+base64.b64encode(content_type.encode()).decode(),
+  'cacheControl '+base64.b64encode(b'3600').decode()
+ ])
+ headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Length':str(size),'Upload-Metadata':metadata,'x-upsert':'true'}
+ r=requests.post(endpoint,headers=headers,timeout=60)
+ if r.status_code not in (201,204): raise RuntimeError(f'Supabase resumable upload init failed ({r.status_code}): {r.text[:1000]}')
+ upload_url=r.headers.get('Location')
+ if not upload_url: raise RuntimeError('Supabase resumable upload did not return an upload URL.')
+ offset=0; chunk_size=6*1024*1024; last_pct=progress_start
+ with path.open('rb') as fh:
+  while offset<size:
+   chunk=fh.read(chunk_size)
+   if not chunk: break
+   for attempt in range(5):
+    try:
+     rr=requests.patch(upload_url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Offset':str(offset),'Content-Type':'application/offset+octet-stream'},data=chunk,timeout=180)
+     if rr.status_code in (204,200):
+      offset=int(rr.headers.get('Upload-Offset',offset+len(chunk))); break
+     if attempt==4: raise RuntimeError(f'Supabase resumable upload chunk failed ({rr.status_code}): {rr.text[:1000]}')
+    except requests.RequestException:
+     if attempt==4: raise
+     time.sleep(2**attempt)
+   if job_id and size:
+    pct=progress_start+int((offset/size)*(progress_end-progress_start))
+    if pct>=last_pct+2:
+     update_job(job_id,progress=min(progress_end,pct)); last_pct=pct
+ return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
 
 def claim_job(job_id=None):
  params={'select':'*','status':'eq.queued','limit':'1'}
@@ -87,7 +138,7 @@ def process(job):
   update_job(job_id,progress=10); download_image(image_url,image); update_job(job_id,progress=25); sound_kind,sound_source=choose_sound(image,title); update_job(job_id,progress=30); generate_thumbnail(image,thumb,title,label); update_job(job_id,progress=35)
   if sound_kind in {'rain','snow','fireplace','candle','forest','cafe'}:
    scene=root/'scene_overlay.mov'; make_scene_overlay(scene,sound_kind); update_job(job_id,progress=42)
-  run_ffmpeg(image,output,duration_hours,sound_kind,scene); update_job(job_id,progress=75); video_path=f'jobs/{job_id}/ambient.mp4'; thumb_path=f'jobs/{job_id}/thumbnail.jpg'; video_url=upload(output,video_path,'video/mp4'); thumb_url=upload(thumb,thumb_path,'image/jpeg'); motion={'rain':'falling_rain','snow':'falling_snow','fireplace':'fire_glow','candle':'candle_flicker','forest':'forest_sway','cafe':'rising_steam'}.get(sound_kind,'static'); update_job(job_id,status='completed',progress=100,result={'title':title,'public_url':video_url,'video_url':video_url,'thumbnail_url':thumb_url,'video_storage_path':video_path,'thumbnail_storage_path':thumb_path,'duration_hours':duration_hours,'soundscape':sound_kind,'sound_source':sound_source,'loop_ready':True,'visual_motion':motion})
+  run_ffmpeg(image,output,duration_hours,sound_kind,scene,job_id); video_path=f'jobs/{job_id}/ambient.mp4'; thumb_path=f'jobs/{job_id}/thumbnail.jpg'; video_url=upload(output,video_path,'video/mp4',job_id,75,96); thumb_url=upload(thumb,thumb_path,'image/jpeg',job_id,96,99); motion={'rain':'falling_rain','snow':'falling_snow','fireplace':'fire_glow','candle':'candle_flicker','forest':'forest_sway','cafe':'rising_steam'}.get(sound_kind,'static'); update_job(job_id,status='completed',progress=100,result={'title':title,'public_url':video_url,'video_url':video_url,'thumbnail_url':thumb_url,'video_storage_path':video_path,'thumbnail_storage_path':thumb_path,'duration_hours':duration_hours,'soundscape':sound_kind,'sound_source':sound_source,'loop_ready':True,'visual_motion':motion})
 
 def main():
  job=claim_job(RENDER_JOB_ID or None)
