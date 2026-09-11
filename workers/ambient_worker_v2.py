@@ -75,7 +75,9 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=
     except ValueError: continue
     pct_int=int(42+min(33,max(0,(out_time/max(duration,1))*33)))
     if job_id and pct_int>=last_progress+2:
-     update_job(job_id,progress=pct_int); last_progress=pct_int
+     try: update_job(job_id,progress=pct_int)
+     except Exception as exc: print(f'Progress update warning: {exc}')
+     last_progress=pct_int
  rc=proc.wait()
  if rc!=0:
   err=(proc.stderr.read() if proc.stderr else '')[-6000:]
@@ -89,39 +91,68 @@ def _storage_upload_endpoint():
   return f'https://{project}.storage.supabase.co/storage/v1/upload/resumable'
  return f'{SUPABASE_URL}/storage/v1/upload/resumable'
 
+def _public_url(storage_path):
+ return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
+
+def _standard_upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
+ url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'
+ size=path.stat().st_size
+ with path.open('rb') as fh:
+  for attempt in range(4):
+   try:
+    rr=requests.post(url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Content-Type':content_type,'x-upsert':'true'},data=fh,timeout=600)
+    if rr.status_code in (200,201): return _public_url(storage_path)
+    if attempt==3: raise RuntimeError(f'Supabase standard upload failed ({rr.status_code}): {rr.text[:1000]}')
+   except requests.RequestException:
+    if attempt==3: raise
+    fh.seek(0); time.sleep(2**attempt)
+ return _public_url(storage_path)
+
 def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
  size=path.stat().st_size
  endpoint=_storage_upload_endpoint()
- metadata=', '.join([
+ # TUS Upload-Metadata is comma-separated with NO whitespace after commas.
+ # Values must be base64; a space after a comma becomes part of the next key and
+ # causes Supabase Storage to reject the entire upload with 400 Invalid upload-metadata.
+ metadata=','.join([
   'bucketName '+base64.b64encode(BUCKET.encode()).decode(),
   'objectName '+base64.b64encode(storage_path.encode()).decode(),
   'contentType '+base64.b64encode(content_type.encode()).decode(),
   'cacheControl '+base64.b64encode(b'3600').decode()
  ])
  headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Length':str(size),'Upload-Metadata':metadata,'x-upsert':'true'}
- r=requests.post(endpoint,headers=headers,timeout=60)
- if r.status_code not in (201,204): raise RuntimeError(f'Supabase resumable upload init failed ({r.status_code}): {r.text[:1000]}')
- upload_url=r.headers.get('Location')
- if not upload_url: raise RuntimeError('Supabase resumable upload did not return an upload URL.')
- offset=0; chunk_size=6*1024*1024; last_pct=progress_start
- with path.open('rb') as fh:
-  while offset<size:
-   chunk=fh.read(chunk_size)
-   if not chunk: break
-   for attempt in range(5):
-    try:
-     rr=requests.patch(upload_url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Offset':str(offset),'Content-Type':'application/offset+octet-stream'},data=chunk,timeout=180)
-     if rr.status_code in (204,200):
-      offset=int(rr.headers.get('Upload-Offset',offset+len(chunk))); break
-     if attempt==4: raise RuntimeError(f'Supabase resumable upload chunk failed ({rr.status_code}): {rr.text[:1000]}')
-    except requests.RequestException:
-     if attempt==4: raise
-     time.sleep(2**attempt)
-   if job_id and size:
-    pct=progress_start+int((offset/size)*(progress_end-progress_start))
-    if pct>=last_pct+2:
-     update_job(job_id,progress=min(progress_end,pct)); last_pct=pct
- return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}'
+ try:
+  r=requests.post(endpoint,headers=headers,timeout=60)
+  if r.status_code not in (201,204):
+   raise RuntimeError(f'Supabase resumable upload init failed ({r.status_code}): {r.text[:1000]}')
+  upload_url=r.headers.get('Location')
+  if not upload_url: raise RuntimeError('Supabase resumable upload did not return an upload URL.')
+  offset=0; chunk_size=6*1024*1024; last_pct=progress_start
+  with path.open('rb') as fh:
+   while offset<size:
+    chunk=fh.read(chunk_size)
+    if not chunk: break
+    sent=False
+    for attempt in range(5):
+     try:
+      rr=requests.patch(upload_url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Tus-Resumable':'1.0.0','Upload-Offset':str(offset),'Content-Type':'application/offset+octet-stream'},data=chunk,timeout=180)
+      if rr.status_code in (204,200):
+       offset=int(rr.headers.get('Upload-Offset',offset+len(chunk))); sent=True; break
+      if attempt==4: raise RuntimeError(f'Supabase resumable upload chunk failed ({rr.status_code}): {rr.text[:1000]}')
+     except requests.RequestException:
+      if attempt==4: raise
+      time.sleep(2**attempt)
+    if not sent: raise RuntimeError('Supabase resumable upload chunk could not be sent.')
+    if job_id and size:
+     pct=progress_start+int((offset/size)*(progress_end-progress_start))
+     if pct>=last_pct+2:
+      try: update_job(job_id,progress=min(progress_end,pct))
+      except Exception as exc: print(f'Upload progress warning: {exc}')
+      last_pct=pct
+  return _public_url(storage_path)
+ except Exception as exc:
+  print(f'Resumable upload failed; retrying with standard Supabase upload: {exc}')
+  return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
 
 def claim_job(job_id=None):
  params={'select':'*','status':'eq.queued','limit':'1'}
