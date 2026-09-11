@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, tempfile, time
+import os, subprocess, tempfile, time, json
 from pathlib import Path
 from urllib.parse import urlparse
 from PIL import Image, ImageStat
@@ -78,8 +78,7 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=
     pct_int=int(42+min(33,max(0,(out_time/max(duration,1))*33)))
     if job_id and pct_int>=last_progress+2:
      update_job(job_id,progress=pct_int); last_progress=pct_int
- rc=proc.wait()
- stderr=proc.stderr.read() if proc.stderr else ''
+ rc=proc.wait(); stderr=proc.stderr.read() if proc.stderr else ''
  if rc!=0: raise RuntimeError(f'ffmpeg failed with exit code {rc}: {stderr[-6000:]}')
  if not output.exists() or output.stat().st_size < 1024: raise RuntimeError('FFmpeg reported success but produced an empty or tiny MP4.')
  if job_id: update_job(job_id,progress=75)
@@ -87,22 +86,19 @@ def run_ffmpeg(image,output,duration_hours,sound_kind,scene_overlay=None,job_id=
 def validate_mp4(path,duration_hours):
  if not path.exists(): raise RuntimeError('Rendered MP4 does not exist.')
  size=path.stat().st_size
- if size < 1024*10: raise RuntimeError(f'Rendered MP4 is suspiciously small ({size} bytes).')
+ if size < 10240: raise RuntimeError(f'Rendered MP4 is suspiciously small ({size} bytes).')
  probe=['ffprobe','-v','error','-show_entries','format=format_name,duration,size:stream=index,codec_type,codec_name,width,height,r_frame_rate','-of','json',str(path)]
  p=subprocess.run(probe,capture_output=True,text=True,timeout=120)
  if p.returncode!=0: raise RuntimeError(f'ffprobe rejected the rendered MP4: {p.stderr[-3000:]}')
- import json
  try: info=json.loads(p.stdout)
  except Exception as exc: raise RuntimeError(f'ffprobe returned invalid JSON: {exc}')
  fmt=info.get('format') or {}; streams=info.get('streams') or []
- video=next((s for s in streams if s.get('codec_type')=='video'),None)
- audio=next((s for s in streams if s.get('codec_type')=='audio'),None)
+ video=next((s for s in streams if s.get('codec_type')=='video'),None); audio=next((s for s in streams if s.get('codec_type')=='audio'),None)
  if not video: raise RuntimeError('Rendered MP4 has no video stream.')
  if video.get('codec_name')!='h264': raise RuntimeError(f'Rendered MP4 video codec is {video.get("codec_name")}, expected h264.')
  if int(video.get('width') or 0)!=1280 or int(video.get('height') or 0)!=720: raise RuntimeError('Rendered MP4 has unexpected video dimensions.')
  if audio and audio.get('codec_name')!='aac': raise RuntimeError(f'Rendered MP4 audio codec is {audio.get("codec_name")}, expected aac.')
- duration=float(fmt.get('duration') or 0)
- expected=max(15.0,float(duration_hours or 1.0)*3600)
+ duration=float(fmt.get('duration') or 0); expected=max(15.0,float(duration_hours or 1.0)*3600)
  if duration < min(expected*0.98,expected-1): raise RuntimeError(f'Rendered MP4 duration is too short: {duration:.2f}s vs expected about {expected:.2f}s.')
  decode=['ffmpeg','-v','error','-i',str(path),'-map','0:v:0','-map','0:a:0?','-f','null','-']
  d=subprocess.run(decode,capture_output=True,text=True,timeout=max(180,int(duration/2)))
@@ -113,29 +109,27 @@ def _public_url(storage_path): return f'{SUPABASE_URL}/storage/v1/object/public/
 
 def _standard_upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
  url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'; size=path.stat().st_size
- last_pct=progress_start
  for attempt in range(5):
   try:
    with path.open('rb') as fh:
     rr=requests.post(url,headers={'Authorization':f'Bearer {SUPABASE_SERVICE_ROLE_KEY}','apikey':SUPABASE_SERVICE_ROLE_KEY,'Content-Type':content_type,'x-upsert':'true'},data=fh,timeout=900)
    if rr.status_code in (200,201): break
-   detail=rr.text[:1000]
-   if attempt==4: raise RuntimeError(f'Supabase upload failed ({rr.status_code}): {detail}')
+   if attempt==4: raise RuntimeError(f'Supabase upload failed ({rr.status_code}): {rr.text[:1000]}')
    print(f'Supabase upload attempt {attempt+1} failed ({rr.status_code}); retrying.')
   except requests.RequestException as exc:
    if attempt==4: raise RuntimeError(f'Supabase upload request failed: {exc}')
    print(f'Supabase upload attempt {attempt+1} failed: {exc}; retrying.')
   time.sleep(2**attempt)
  public=_public_url(storage_path)
- # Verify that the object is really present before the job is marked complete.
  for attempt in range(5):
   try:
    head=requests.head(public,timeout=30)
    if head.status_code==200:
     remote_size=int(head.headers.get('content-length','0') or 0)
     if remote_size and remote_size != size: raise RuntimeError(f'Uploaded object size mismatch: local {size}, remote {remote_size}.')
-    probe=requests.get(public,headers={'Range':'bytes=0-31'},timeout=30)
-    if probe.status_code not in (200,206) or len(probe.content)<12 or probe.content[4:8]!=b'ftyp': raise RuntimeError('Uploaded MP4 failed storage playback probe: missing MP4 ftyp header.')
+    if content_type=='video/mp4':
+     probe=requests.get(public,headers={'Range':'bytes=0-31'},timeout=30)
+     if probe.status_code not in (200,206) or len(probe.content)<12 or probe.content[4:8]!=b'ftyp': raise RuntimeError('Uploaded MP4 failed storage playback probe: missing MP4 ftyp header.')
     return public
    print(f'Upload verification attempt {attempt+1}: HTTP {head.status_code}')
   except requests.RequestException as exc: print(f'Upload verification warning: {exc}')
@@ -143,9 +137,6 @@ def _standard_upload(path,storage_path,content_type,job_id=None,progress_start=7
  raise RuntimeError('Supabase upload completed but the stored object could not be verified.')
 
 def upload(path,storage_path,content_type,job_id=None,progress_start=75,progress_end=95):
- # Use the stable object API directly. The previous TUS path could fail at
- # initialization with "Invalid upload-metadata" and prevented completed renders
- # from ever reaching the playable-video verification stage.
  return _standard_upload(path,storage_path,content_type,job_id,progress_start,progress_end)
 
 def claim_job(job_id=None):
