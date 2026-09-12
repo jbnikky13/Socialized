@@ -3,9 +3,6 @@ import os
 import subprocess
 from pathlib import Path
 import requests
-
-# Keep the existing renderer/classifier intact, but replace the fragile final
-# upload with a small, independently testable safety layer.
 import workers.ambient_worker_v2 as base
 
 MAX_VIDEO_MB = int(os.getenv('MAX_VIDEO_MB', '45'))
@@ -18,34 +15,19 @@ def _public(path: str) -> str:
     return f'{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}'
 
 
-def _update(job_id, **fields):
-    try:
-        base.update_job(job_id, **fields)
-    except Exception:
-        pass
-
-
 def _shrink_video(path: Path, job_id: str) -> None:
     limit = MAX_VIDEO_MB * 1024 * 1024
     if path.stat().st_size <= limit:
         return
-
-    # Ambient scenes are intentionally low-motion. Re-encode only when needed,
-    # keeping 1280x720/H.264/AAC and faststart for browser playback.
-    attempts = [(33, '900k', '80k'), (35, '700k', '64k'), (37, '550k', '56k')]
-    for idx, (crf, rate, audio) in enumerate(attempts, 1):
+    # A one-hour file must average below ~100 kbps to fit 45 MB.
+    # Use a deterministic bitrate ladder rather than CRF guesses.
+    attempts = [('640k', '64k', '854:480', '24'), ('420k', '48k', '854:480', '20'), ('300k', '40k', '640:360', '20'), ('220k', '32k', '640:360', '18')]
+    for idx, (video_rate, audio_rate, scale, fps) in enumerate(attempts, 1):
         temp = path.with_name(f'{path.stem}.safe{idx}.mp4')
-        print(f'Safe compression {idx}: {path.stat().st_size/1024/1024:.1f} MB -> <= {MAX_VIDEO_MB} MB')
-        cmd = [
-            'ffmpeg', '-y', '-i', str(path),
-            '-map', '0:v:0', '-map', '0:a:0?',
-            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf),
-            '-maxrate', rate, '-bufsize', str(int(rate[:-1]) * 2) + 'k',
-            '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level', '4.0',
-            '-c:a', 'aac', '-b:a', audio, '-ar', '44100',
-            '-movflags', '+faststart', str(temp)
-        ]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        print(f'Safe compression {idx}: {path.stat().st_size/1024/1024:.1f} MB -> target <= {MAX_VIDEO_MB} MB')
+        vf = f'scale={scale}:force_original_aspect_ratio=decrease,pad={scale.split(":")[0]}:{scale.split(":")[1]}:(ow-iw)/2:(oh-ih)/2,format=yuv420p'
+        cmd = ['ffmpeg','-y','-i',str(path),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',fps,'-c:v','libx264','-preset','veryfast','-b:v',video_rate,'-maxrate',video_rate,'-bufsize',str(int(video_rate[:-1])*2)+'k','-pix_fmt','yuv420p','-profile:v','main','-c:a','aac','-b:a',audio_rate,'-ar','44100','-movflags','+faststart',str(temp)]
+        p = subprocess.run(cmd,capture_output=True,text=True,timeout=900)
         if p.returncode != 0:
             temp.unlink(missing_ok=True)
             raise RuntimeError(f'Safe compression failed: {p.stderr[-3000:]}')
@@ -54,7 +36,7 @@ def _shrink_video(path: Path, job_id: str) -> None:
             print(f'Safe compression complete: {path.stat().st_size/1024/1024:.1f} MB')
             return
         temp.unlink(missing_ok=True)
-    raise RuntimeError(f'Video is still too large after safe compression: {path.stat().st_size/1024/1024:.1f} MB')
+    raise RuntimeError(f'Video remains above {MAX_VIDEO_MB} MB after deterministic compression.')
 
 
 def safe_upload(path: Path, storage_path: str, content_type: str, job_id=None, progress_start=75, progress_end=95):
@@ -62,48 +44,28 @@ def safe_upload(path: Path, storage_path: str, content_type: str, job_id=None, p
         _shrink_video(path, job_id or '')
     url = f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'
     size = path.stat().st_size
-    headers = {
-        'Authorization': f'Bearer {SUPABASE_KEY}',
-        'apikey': SUPABASE_KEY,
-        'Content-Type': content_type,
-        'x-upsert': 'true',
-    }
+    headers = {'Authorization': f'Bearer {SUPABASE_KEY}','apikey': SUPABASE_KEY,'Content-Type': content_type,'x-upsert': 'true'}
     for attempt in range(5):
         try:
             with path.open('rb') as fh:
-                r = requests.post(url, headers=headers, data=fh, timeout=900)
-            if r.status_code in (200, 201):
-                break
-            if r.status_code == 413 and content_type == 'video/mp4':
-                # A proxy/storage limit is lower than expected; force the next
-                # encode pass before retrying rather than repeatedly sending it.
-                raise RuntimeError(f'Supabase still rejected video with 413 at {size/1024/1024:.1f} MB: {r.text[:500]}')
-            if attempt == 4:
-                raise RuntimeError(f'Supabase upload failed ({r.status_code}): {r.text[:1000]}')
-            print(f'Upload attempt {attempt + 1} failed ({r.status_code}); retrying.')
+                r = requests.post(url,headers=headers,data=fh,timeout=900)
+            if r.status_code in (200,201): break
+            if attempt == 4: raise RuntimeError(f'Supabase upload failed ({r.status_code}): {r.text[:1000]}')
+            print(f'Upload attempt {attempt+1} failed ({r.status_code}); retrying.')
         except requests.RequestException as exc:
-            if attempt == 4:
-                raise RuntimeError(f'Supabase upload request failed: {exc}')
-            print(f'Upload attempt {attempt + 1} failed: {exc}; retrying.')
-        import time
-        time.sleep(2 ** attempt)
-
+            if attempt == 4: raise RuntimeError(f'Supabase upload request failed: {exc}')
+            print(f'Upload attempt {attempt+1} failed: {exc}; retrying.')
+        import time; time.sleep(2 ** attempt)
     public = _public(storage_path)
-    h = requests.head(public, timeout=30)
-    if h.status_code != 200:
-        raise RuntimeError(f'Upload completed but verification returned HTTP {h.status_code}.')
-    remote = int(h.headers.get('content-length', '0') or 0)
-    if remote and remote != size:
-        raise RuntimeError(f'Uploaded size mismatch: local {size}, remote {remote}.')
+    h = requests.head(public,timeout=30)
+    if h.status_code != 200: raise RuntimeError(f'Upload completed but verification returned HTTP {h.status_code}.')
+    remote = int(h.headers.get('content-length','0') or 0)
+    if remote and remote != size: raise RuntimeError(f'Uploaded size mismatch: local {size}, remote {remote}.')
     if content_type == 'video/mp4':
-        probe = requests.get(public, headers={'Range': 'bytes=0-31'}, timeout=30)
-        if probe.status_code not in (200, 206) or len(probe.content) < 12 or probe.content[4:8] != b'ftyp':
-            raise RuntimeError('Uploaded MP4 failed the playback header check.')
+        probe = requests.get(public,headers={'Range':'bytes=0-31'},timeout=30)
+        if probe.status_code not in (200,206) or len(probe.content)<12 or probe.content[4:8] != b'ftyp': raise RuntimeError('Uploaded MP4 failed playback header check.')
     return public
 
-
-# process() in v2 resolves upload() from its own module globals. Replace that
-# reference before entering the existing pipeline.
 base.upload = safe_upload
 
 if __name__ == '__main__':
