@@ -1,10 +1,10 @@
 from __future__ import annotations
-import os, subprocess, json, time
+import os, subprocess, time
 from pathlib import Path
 import requests
 import workers.ambient_worker_v2 as base
 
-MAX_VIDEO_MB = int(os.getenv('MAX_VIDEO_MB', '45'))
+MAX_VIDEO_MB = int(os.getenv('MAX_VIDEO_MB', '200'))
 SUPABASE_URL = os.environ['SUPABASE_URL'].rstrip('/')
 SUPABASE_KEY = os.environ['SUPABASE_SERVICE_ROLE_KEY']
 BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET', 'media-assets')
@@ -22,34 +22,32 @@ def _duration(path):
 
 def _encode_to_target(src, dst, duration, video_kbps, audio_kbps, width, height, fps):
     vf=f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p'
-    cmd=['ffmpeg','-y','-i',str(src),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',str(fps),'-c:v','libx264','-preset','veryfast','-b:v',f'{video_kbps}k','-maxrate',f'{video_kbps}k','-bufsize',f'{video_kbps*2}k','-pix_fmt','yuv420p','-profile:v','main','-c:a','aac','-b:a',f'{audio_kbps}k','-ar','44100','-t',str(duration),'-movflags','+faststart',str(dst)]
+    cmd=['ffmpeg','-y','-i',str(src),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',str(fps),'-c:v','libx264','-preset','slow','-b:v',f'{video_kbps}k','-maxrate',f'{video_kbps}k','-bufsize',f'{video_kbps*2}k','-pix_fmt','yuv420p','-profile:v','high','-c:a','aac','-b:a',f'{audio_kbps}k','-ar','44100','-t',str(duration),'-movflags','+faststart',str(dst)]
     p=subprocess.run(cmd,capture_output=True,text=True,timeout=1800)
     if p.returncode!=0: raise RuntimeError(f'Compression failed: {p.stderr[-4000:]}')
 
 
 def _shrink_video(path, job_id):
-    limit=int(MAX_VIDEO_MB*0.90*1024*1024)  # leave 10% headroom for storage/proxy limits
+    limit=int(MAX_VIDEO_MB*0.90*1024*1024)
     if path.stat().st_size <= limit: return
     duration=_duration(path)
-    # Calculate the total bitrate required to fit the actual duration under the limit.
-    target_total_kbps=max(48,int((limit*8)/(duration*1000)))
-    # Reserve enough bitrate for ambient AAC, give the rest to video.
-    audio_kbps=24 if target_total_kbps>=70 else 16
-    video_kbps=max(24,target_total_kbps-audio_kbps-5)
-    profiles=[(640,360,15),(640,360,12),(480,270,12)]
+    target_total_kbps=max(160,int((limit*8)/(duration*1000)))
+    audio_kbps=64 if target_total_kbps>=240 else 48
+    video_kbps=max(80,target_total_kbps-audio_kbps-5)
+    profiles=[(1920,1080,30),(1920,1080,24),(1280,720,24)]
     for idx,(w,h,fps) in enumerate(profiles,1):
         temp=path.with_name(f'{path.stem}.safe{idx}.mp4')
-        print(f'Size-target encode {idx}: duration={duration/3600:.2f}h total={target_total_kbps}kbps video={video_kbps}k audio={audio_kbps}k {w}x{h}@{fps}')
+        print(f'Sleep-video size encode {idx}: duration={duration/3600:.2f}h total={target_total_kbps}kbps video={video_kbps}k audio={audio_kbps}k {w}x{h}@{fps}')
         _encode_to_target(path,temp,duration,video_kbps,audio_kbps,w,h,fps)
         size=temp.stat().st_size
-        print(f'Size-target result {idx}: {size/1024/1024:.2f} MB')
+        print(f'Sleep-video size result {idx}: {size/1024/1024:.2f} MB')
         if size <= limit:
             temp.replace(path)
             return
         temp.unlink(missing_ok=True)
-        target_total_kbps=max(40,int(target_total_kbps*0.78))
-        audio_kbps=16
-        video_kbps=max(20,target_total_kbps-audio_kbps-5)
+        target_total_kbps=max(120,int(target_total_kbps*0.78))
+        audio_kbps=48
+        video_kbps=max(64,target_total_kbps-audio_kbps-5)
     raise RuntimeError(f'Video remains too large after deterministic size targeting: {path.stat().st_size/1024/1024:.1f} MB')
 
 
