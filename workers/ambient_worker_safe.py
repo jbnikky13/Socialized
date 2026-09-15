@@ -21,10 +21,18 @@ def _duration(path):
 
 
 def _encode_to_target(src, dst, duration, video_kbps, audio_kbps, width, height, fps):
-    vf=f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p'
+    vf=f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=yuv420p'
     cmd=['ffmpeg','-y','-i',str(src),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',str(fps),'-c:v','libx264','-preset','slow','-b:v',f'{video_kbps}k','-maxrate',f'{video_kbps}k','-bufsize',f'{video_kbps*2}k','-pix_fmt','yuv420p','-profile:v','high','-c:a','aac','-b:a',f'{audio_kbps}k','-ar','44100','-t',str(duration),'-movflags','+faststart',str(dst)]
     p=subprocess.run(cmd,capture_output=True,text=True,timeout=1800)
     if p.returncode!=0: raise RuntimeError(f'Compression failed: {p.stderr[-4000:]}')
+
+
+def _upgrade_to_1080(path):
+    duration=_duration(path)
+    temp=path.with_name(f'{path.stem}.1080.mp4')
+    print(f'Upgrading sleep video to 1920x1080: {duration/3600:.2f}h')
+    _encode_to_target(path,temp,duration,1800,96,1920,1080,30)
+    temp.replace(path)
 
 
 def _shrink_video(path, job_id):
@@ -53,8 +61,10 @@ def _shrink_video(path, job_id):
 
 def safe_upload(path, storage_path, content_type, job_id=None, progress_start=75, progress_end=95):
     if content_type=='video/mp4':
+        _upgrade_to_1080(path)
+        if job_id: base.update_job(job_id, progress=82)
         _shrink_video(path, job_id or '')
-        base.update_job(job_id, progress=88)
+        if job_id: base.update_job(job_id, progress=88)
     url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'
     size=path.stat().st_size
     headers={'Authorization':f'Bearer {SUPABASE_KEY}','apikey':SUPABASE_KEY,'Content-Type':content_type,'x-upsert':'true'}
