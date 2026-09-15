@@ -20,19 +20,24 @@ def _duration(path):
     return max(1.0, float(p.stdout.strip()))
 
 
-def _encode_to_target(src, dst, duration, video_kbps, audio_kbps, width, height, fps):
+def _encode_to_target(src, dst, duration, video_kbps, audio_kbps, width, height, fps, preset='veryfast', timeout=3300):
     vf=f'scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},format=yuv420p'
-    cmd=['ffmpeg','-y','-i',str(src),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',str(fps),'-c:v','libx264','-preset','slow','-b:v',f'{video_kbps}k','-maxrate',f'{video_kbps}k','-bufsize',f'{video_kbps*2}k','-pix_fmt','yuv420p','-profile:v','high','-c:a','aac','-b:a',f'{audio_kbps}k','-ar','44100','-t',str(duration),'-movflags','+faststart',str(dst)]
-    p=subprocess.run(cmd,capture_output=True,text=True,timeout=1800)
+    cmd=['ffmpeg','-y','-i',str(src),'-map','0:v:0','-map','0:a:0?','-vf',vf,'-r',str(fps),'-c:v','libx264','-preset',preset,'-b:v',f'{video_kbps}k','-maxrate',f'{video_kbps}k','-bufsize',f'{video_kbps*2}k','-pix_fmt','yuv420p','-profile:v','high','-c:a','aac','-b:a',f'{audio_kbps}k','-ar','44100','-t',str(duration),'-movflags','+faststart',str(dst)]
+    print(f'Encoding {width}x{height}@{fps}, preset={preset}, video={video_kbps}k audio={audio_kbps}k, timeout={timeout}s')
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=timeout)
     if p.returncode!=0: raise RuntimeError(f'Compression failed: {p.stderr[-4000:]}')
 
 
-def _upgrade_to_1080(path):
+def _upgrade_to_1080(path, job_id=None):
     duration=_duration(path)
     temp=path.with_name(f'{path.stem}.1080.mp4')
     print(f'Upgrading sleep video to 1920x1080: {duration/3600:.2f}h')
-    _encode_to_target(path,temp,duration,1800,96,1920,1080,30)
+    # A 30fps slow encode caused the previous failure after exactly 30 minutes.
+    # Sleep footage does not need 30fps; 24fps + veryfast is substantially faster
+    # while remaining visually smooth and keeps the upgrade within the workflow budget.
+    _encode_to_target(path,temp,duration,1600,96,1920,1080,24,preset='veryfast',timeout=3300)
     temp.replace(path)
+    if job_id: base.update_job(job_id, progress=84)
 
 
 def _shrink_video(path, job_id):
@@ -42,11 +47,11 @@ def _shrink_video(path, job_id):
     target_total_kbps=max(160,int((limit*8)/(duration*1000)))
     audio_kbps=64 if target_total_kbps>=240 else 48
     video_kbps=max(80,target_total_kbps-audio_kbps-5)
-    profiles=[(1920,1080,30),(1920,1080,24),(1280,720,24)]
+    profiles=[(1920,1080,24),(1920,1080,20),(1280,720,24)]
     for idx,(w,h,fps) in enumerate(profiles,1):
         temp=path.with_name(f'{path.stem}.safe{idx}.mp4')
         print(f'Sleep-video size encode {idx}: duration={duration/3600:.2f}h total={target_total_kbps}kbps video={video_kbps}k audio={audio_kbps}k {w}x{h}@{fps}')
-        _encode_to_target(path,temp,duration,video_kbps,audio_kbps,w,h,fps)
+        _encode_to_target(path,temp,duration,video_kbps,audio_kbps,w,h,fps,preset='veryfast',timeout=3300)
         size=temp.stat().st_size
         print(f'Sleep-video size result {idx}: {size/1024/1024:.2f} MB')
         if size <= limit:
@@ -61,8 +66,7 @@ def _shrink_video(path, job_id):
 
 def safe_upload(path, storage_path, content_type, job_id=None, progress_start=75, progress_end=95):
     if content_type=='video/mp4':
-        _upgrade_to_1080(path)
-        if job_id: base.update_job(job_id, progress=82)
+        _upgrade_to_1080(path, job_id or '')
         _shrink_video(path, job_id or '')
         if job_id: base.update_job(job_id, progress=88)
     url=f'{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}'
